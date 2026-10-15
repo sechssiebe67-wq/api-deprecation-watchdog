@@ -36,5 +36,18 @@ class DigestConfigTests(unittest.TestCase):
         self.assertEqual(Config.from_env({"DIGEST_MAX_ALERTS": "0"}).digest_max_alerts, 1)
 
 
+class WebhookConfigTests(unittest.TestCase):
+    def test_defaults_to_none(self):
+        self.assertIsNone(Config.from_env({}).webhook_url)
+
+    def test_reads_webhook_url(self):
+        config = Config.from_env({"WEBHOOK_URL": "https://example.test/hook"})
+        self.assertEqual(config.webhook_url, "https://example.test/hook")
+
+    def test_notify_channels_accepts_webhook(self):
+        config = Config.from_env({"NOTIFY_CHANNELS": "webhook"})
+        self.assertEqual(config.notify_channels, ["webhook"])
+
+
 if __name__ == "__main__":
     unittest.main()

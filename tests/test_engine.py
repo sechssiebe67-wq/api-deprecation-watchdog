@@ -4,7 +4,7 @@ import unittest
 from apiwatch.engine import Engine, seed_default_sources
 from apiwatch.fetcher import FakeFetcher
 from apiwatch.models import Source
-from apiwatch.notify import NotificationError, Notifier
+from apiwatch.notify import NotificationError, Notifier, WebhookNotifier
 from apiwatch.store import Store
 
 
@@ -356,6 +356,119 @@ class DigestEngineTests(unittest.TestCase):
         self.assertEqual(digest.omitted, 0)
         self.assertEqual(notifier.digests[0].subject, digest.subject)
         self.assertEqual(self.store.get_digest(digest.id).subject, digest.subject)
+
+
+class RecordingWebhook(WebhookNotifier):
+    """A ``WebhookNotifier`` that records the resolved URL instead of sending."""
+
+    def __init__(self, global_url="https://global.test/hook"):
+        super().__init__(global_url)
+        self.calls = []
+
+    def _post(self, url, payload):
+        self.calls.append((url, payload))
+
+
+class FailingWebhook(WebhookNotifier):
+    def __init__(self):
+        super().__init__("https://global.test/hook")
+
+    def _post(self, url, payload):
+        raise NotificationError("webhook returned 500")
+
+
+class NamedNotifier(Notifier):
+    def __init__(self, name):
+        self.name = name
+        self.batches = []
+
+    def send(self, alerts, source_names):
+        self.batches.append(list(alerts))
+
+
+class WebhookEngineTests(unittest.TestCase):
+    def setUp(self):
+        self.store = Store(":memory:")
+        self.url_a = "https://example.com/a"
+        self.url_b = "https://example.com/b"
+
+    def tearDown(self):
+        self.store.close()
+
+    def _source(self, name, url, webhook_url=None):
+        return self.store.add_source(
+            Source(
+                name=name,
+                url=url,
+                kind="rss",
+                tracked_versions=["v1"],
+                notify_channels=["webhook"],
+                notify_webhook_url=webhook_url,
+            )
+        )
+
+    def test_webhook_channel_routes_only_to_webhook(self):
+        source = self._source("A", self.url_a)
+        webhook = RecordingWebhook()
+        console = NamedNotifier("console")
+        slack = NamedNotifier("slack")
+        engine = Engine(
+            self.store,
+            FakeFetcher({self.url_a: RSS}),
+            notifiers=[console, slack, webhook],
+        )
+        result = engine.scan_source(source)
+        self.assertEqual(result.alerts_created, 1)
+        self.assertEqual(console.batches, [])
+        self.assertEqual(slack.batches, [])
+        self.assertEqual(len(webhook.calls), 1)
+        self.assertEqual(webhook.calls[0][0], "https://global.test/hook")
+        # Delivered by the webhook, so it is no longer pending.
+        self.assertEqual(len(self.store.list_alerts(notified=False)), 0)
+
+    def test_per_source_url_overrides_global(self):
+        critical = self._source("Critical", self.url_a, webhook_url="https://example.test/critical")
+        normal = self._source("Normal", self.url_b)
+        webhook = RecordingWebhook()
+        engine = Engine(
+            self.store,
+            FakeFetcher({self.url_a: RSS, self.url_b: RSS}),
+            notifiers=[webhook],
+        )
+        engine.scan_source(critical)
+        engine.scan_source(normal)
+        urls = [url for url, _ in webhook.calls]
+        self.assertIn("https://example.test/critical", urls)
+        self.assertIn("https://global.test/hook", urls)
+
+    def test_failed_webhook_leaves_alert_pending(self):
+        source = self._source("A", self.url_a)
+        engine = Engine(
+            self.store, FakeFetcher({self.url_a: RSS}), notifiers=[FailingWebhook()]
+        )
+        engine.scan_source(source)
+        self.assertEqual(len(self.store.list_alerts(notified=False)), 1)
+
+    def test_digest_uses_per_source_url(self):
+        source = self._source(
+            "Critical", self.url_a, webhook_url="https://example.test/critical"
+        )
+        webhook = RecordingWebhook()
+        engine = Engine(
+            self.store,
+            FakeFetcher({self.url_a: RSS}),
+            notifiers=[webhook],
+            digest_mode="digest",
+        )
+        engine.scan_source(source)
+        self.assertEqual(webhook.calls, [])
+        digest = engine.flush_digest()
+        self.assertIsNotNone(digest)
+        self.assertEqual(len(webhook.calls), 1)
+        url, payload = webhook.calls[0]
+        self.assertEqual(url, "https://example.test/critical")
+        self.assertIn("digest", payload)
+        self.assertEqual(len(self.store.list_alerts(notified=False)), 0)
 
 
 if __name__ == "__main__":

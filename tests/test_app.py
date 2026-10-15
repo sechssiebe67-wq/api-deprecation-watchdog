@@ -529,6 +529,67 @@ class OpenAppTests(AppTestCase):
         status, _ = self.request("DELETE", "/api/sources/%d" % source_id)
         self.assertEqual(status, 200)
 
+    def test_create_source_with_notify_webhook_url(self):
+        status, body = self.request(
+            "POST",
+            "/api/sources",
+            {
+                "name": "Example",
+                "url": FEED_URL,
+                "kind": "rss",
+                "notify_channels": ["webhook"],
+                "notify_webhook_url": "https://example.test/critical",
+            },
+        )
+        self.assertEqual(status, 201)
+        source = json.loads(body)
+        self.assertEqual(source["notify_channels"], ["webhook"])
+        self.assertEqual(source["notify_webhook_url"], "https://example.test/critical")
+
+        status, body = self.request("GET", "/api/sources")
+        self.assertEqual(status, 200)
+        stored = json.loads(body)["sources"][0]
+        self.assertEqual(stored["notify_webhook_url"], "https://example.test/critical")
+
+        status, body = self.request("GET", "/api/sources/%d" % source["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["notify_webhook_url"], "https://example.test/critical")
+
+    def test_notify_webhook_url_defaults_to_null(self):
+        status, body = self.request(
+            "POST", "/api/sources", {"name": "Example", "url": FEED_URL, "kind": "rss"}
+        )
+        self.assertEqual(status, 201)
+        self.assertIsNone(json.loads(body)["notify_webhook_url"])
+
+    def test_invalid_notify_webhook_url_rejected(self):
+        status, body = self.request(
+            "POST",
+            "/api/sources",
+            {
+                "name": "Example",
+                "url": FEED_URL,
+                "kind": "rss",
+                "notify_webhook_url": "not-a-url",
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("notify_webhook_url", json.loads(body)["error"])
+
+    def test_unknown_channel_error_lists_webhook(self):
+        status, body = self.request(
+            "POST",
+            "/api/sources",
+            {
+                "name": "Example",
+                "url": FEED_URL,
+                "kind": "rss",
+                "notify_channels": ["pagerduty"],
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("webhook", json.loads(body)["error"])
+
 
 class SecuredAppTests(AppTestCase):
     token = "secret-token"

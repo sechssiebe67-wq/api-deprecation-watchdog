@@ -7,7 +7,7 @@ from typing import List, Optional
 
 SOURCE_KINDS = ("rss", "html", "json", "statuspage", "github", "gitlab", "openapi")
 SEVERITIES = ("critical", "warning", "info")
-NOTIFY_CHANNELS = ("console", "slack", "email")
+NOTIFY_CHANNELS = ("console", "slack", "email", "webhook")
 ALL_CHANNELS = "all"
 
 
@@ -22,6 +22,7 @@ class Source:
     selector: Optional[str] = None
     min_severity: str = "info"
     notify_channels: List[str] = field(default_factory=lambda: [ALL_CHANNELS])
+    notify_webhook_url: Optional[str] = None
     scan_interval_seconds: Optional[int] = None
     id: Optional[int] = None
     created_at: Optional[str] = None
@@ -29,6 +30,13 @@ class Source:
     def __post_init__(self) -> None:
         if self.min_severity not in SEVERITIES:
             raise ValueError("min_severity must be one of %s" % ", ".join(SEVERITIES))
+        if self.notify_webhook_url is not None:
+            if (
+                not isinstance(self.notify_webhook_url, str)
+                or not self.notify_webhook_url.strip().startswith(("http://", "https://"))
+            ):
+                raise ValueError("notify_webhook_url must be an http(s) URL")
+            self.notify_webhook_url = self.notify_webhook_url.strip()
         interval = self.scan_interval_seconds
         if interval is not None:
             # ``bool`` is an ``int`` subclass but is not a meaningful interval.
@@ -67,6 +75,7 @@ class Source:
             "selector": self.selector,
             "min_severity": self.min_severity,
             "notify_channels": list(self.notify_channels),
+            "notify_webhook_url": self.notify_webhook_url,
             "scan_interval_seconds": self.scan_interval_seconds,
             "created_at": self.created_at,
         }
