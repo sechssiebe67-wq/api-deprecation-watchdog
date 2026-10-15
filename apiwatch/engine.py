@@ -31,21 +31,25 @@ class ScanResult:
     sources_checked: int = 0
     sources_failed: int = 0
     sources_skipped: int = 0
+    sources_truncated: int = 0
     entries_seen: int = 0
     entries_new: int = 0
     alerts_created: int = 0
     alerts: List[Alert] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+    truncated_sources: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "sources_checked": self.sources_checked,
             "sources_failed": self.sources_failed,
             "sources_skipped": self.sources_skipped,
+            "sources_truncated": self.sources_truncated,
             "entries_seen": self.entries_seen,
             "entries_new": self.entries_new,
             "alerts_created": self.alerts_created,
             "errors": list(self.errors),
+            "truncated_sources": list(self.truncated_sources),
         }
 
 
@@ -60,6 +64,7 @@ class Engine:
         digest_max_alerts: int = 50,
         breaker_threshold: int = 5,
         breaker_cooldown_seconds: int = 1800,
+        fetch_max_bytes: int = 2_000_000,
         clock: Optional[Callable[[], datetime]] = None,
     ) -> None:
         self.store = store
@@ -70,6 +75,7 @@ class Engine:
         self.digest_max_alerts = max(1, int(digest_max_alerts))
         self.breaker_threshold = max(1, int(breaker_threshold))
         self.breaker_cooldown_seconds = max(1, int(breaker_cooldown_seconds))
+        self.fetch_max_bytes = max(1, int(fetch_max_bytes))
         self._clock = clock
 
     # -- circuit breaker --------------------------------------------------- #
@@ -121,9 +127,14 @@ class Engine:
             # check still covers every healthy source without hammering this one.
             result.sources_skipped += 1
             return result
+        cap = source.max_bytes if source.max_bytes is not None else self.fetch_max_bytes
         try:
-            body = self.fetcher.fetch(
-                source.url, headers=source.headers, auth=source.auth
+            body, truncated = self.fetcher.fetch(
+                source.url,
+                headers=source.headers,
+                auth=source.auth,
+                max_bytes=cap,
+                allow_truncated=True,
             )
         except FetchError as exc:
             result.sources_failed += 1
@@ -135,16 +146,36 @@ class Engine:
             result.errors.append("%s: %s" % (source.name, exc))
             return result
 
+        if truncated:
+            # The body was clipped at the byte cap. Still parse what arrived so
+            # a partial feed degrades gracefully instead of being dropped, but do
+            # not treat it as a failure: a large-but-valid feed must not trip the
+            # circuit breaker. The signal is surfaced on the result and the store.
+            result.sources_truncated += 1
+            result.truncated_sources.append(source.name)
+            result.errors.append(
+                "%s: response truncated to %d bytes" % (source.name, cap)
+            )
+            log.warning(
+                "source %s response truncated at %d bytes; parsing partial body",
+                source.name,
+                cap,
+            )
+
         parsed = parsers.parse(source.kind, body, base_url=source.url, selector=source.selector)
         result.sources_checked = 1
         result.entries_seen = len(parsed)
-        if (
+        malformed = (
             source.kind == "openapi"
             and body.strip()
             and parsers.openapi_document(body) is None
-        ):
+        )
+        if malformed and not truncated:
             # Distinguish malformed input from a legitimate no-op diff: record an
-            # error but keep scanning the other sources.
+            # error but keep scanning the other sources. A clipped body is never
+            # treated as malformed: the missing tail is an artifact of the byte
+            # cap, not a broken document, so truncation alone must not increment
+            # failure_count or trip the breaker.
             if self._register_failure(source):
                 result.errors.append(
                     "%s: circuit breaker tripped until %s"
@@ -153,6 +184,7 @@ class Engine:
             result.errors.append("%s: malformed OpenAPI input" % source.name)
         else:
             self._register_success(source)
+        self.store.record_source_truncation(source.id, truncated)
 
         versions = source.tracked_versions or []
         new_alerts: List[Alert] = []
@@ -217,11 +249,13 @@ class Engine:
             result.sources_checked += sub.sources_checked
             result.sources_failed += sub.sources_failed
             result.sources_skipped += sub.sources_skipped
+            result.sources_truncated += sub.sources_truncated
             result.entries_seen += sub.entries_seen
             result.entries_new += sub.entries_new
             result.alerts_created += sub.alerts_created
             result.alerts.extend(sub.alerts)
             result.errors.extend(sub.errors)
+            result.truncated_sources.extend(sub.truncated_sources)
             if sub.errors:
                 log.warning("scan errors for %s: %s", source.name, sub.errors)
         return result

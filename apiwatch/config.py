@@ -16,12 +16,35 @@ DIGEST_MODES = ("off", "digest", "both")
 DIGEST_INTERVAL_MIN_SECONDS = 300
 BREAKER_THRESHOLD_MIN = 1
 BREAKER_COOLDOWN_MIN_SECONDS = 60
+FETCH_MAX_BYTES_DEFAULT = 2_000_000
+FETCH_MAX_BYTES_MIN = 1024
 
 
 def _bool(value: Optional[str], default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _fetch_max_bytes(value: Optional[str]) -> int:
+    """Parse ``FETCH_MAX_BYTES`` into a positive byte cap.
+
+    Defaults to :data:`FETCH_MAX_BYTES_DEFAULT` when unset or blank, floors the
+    result at :data:`FETCH_MAX_BYTES_MIN` and falls back to the default (with a
+    warning) when the value is not an integer, so a typo cannot crash startup.
+    """
+    if value is None or not str(value).strip():
+        return FETCH_MAX_BYTES_DEFAULT
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        log.warning(
+            "invalid FETCH_MAX_BYTES %r; falling back to %d",
+            value,
+            FETCH_MAX_BYTES_DEFAULT,
+        )
+        return FETCH_MAX_BYTES_DEFAULT
+    return max(FETCH_MAX_BYTES_MIN, parsed)
 
 
 def _digest_mode(value: Optional[str]) -> str:
@@ -72,6 +95,7 @@ class Config:
     digest_max_alerts: int = 50
     breaker_threshold: int = 5
     breaker_cooldown_seconds: int = 1800
+    fetch_max_bytes: int = FETCH_MAX_BYTES_DEFAULT
 
     @property
     def db_path(self) -> str:
@@ -118,4 +142,5 @@ class Config:
                 BREAKER_COOLDOWN_MIN_SECONDS,
                 int(env.get("BREAKER_COOLDOWN_SECONDS") or 1800),
             ),
+            fetch_max_bytes=_fetch_max_bytes(env.get("FETCH_MAX_BYTES")),
         )

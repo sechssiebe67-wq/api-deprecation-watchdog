@@ -54,6 +54,14 @@ actually use.
   cadence, so a volatile dependency can be polled every 15 minutes while a
   stable SDK is checked once a day. Omitting it keeps the global cadence; a
   manual `POST /api/check` always scans every enabled source.
+- **Fetch size limits & truncation reporting**: every fetch reads at most
+  `FETCH_MAX_BYTES` (default `2000000`, i.e. 2 MB, floored at `1024`) bytes, and
+  each source can override that with a positive `max_bytes`. A clipped body is
+  still parsed so a large feed degrades gracefully instead of being dropped or
+  tripping the circuit breaker, the truncation is logged and reported as
+  `sources_truncated` in `GET /api/stats`, and the dashboard shows a compact
+  `truncated` badge in the `Health` column. The raw body is never stored beyond
+  the normal 20 KB entry cap or rendered on the dashboard.
 - **Per-source request headers & basic auth**: each source can send custom HTTP
   `headers` (for example `{"X-Api-Key": "secret"}`) and an `auth`
   (`"user:password"`) convenience field that adds
@@ -84,7 +92,8 @@ actually use.
   the global default), an `Auth` column showing a lock/header-count indicator
   (never the secret values), a `Keywords` column showing a compact
   `+extra / -suppressed` count (`–` when both lists are empty), a `Health`
-  column (`ok`, `N failures` or `tripped until <time>` with a `Reset` action), a
+  column (`ok`, `N failures`, `truncated` for a clipped last scan, or
+  `tripped until <time>` with a `Reset` action), a
   JSON API and a `Download JSON` link that snapshots the full state through
   `/api/export`.
 - **JSON data export**: a read-only `GET /api/export` returns one document with
@@ -124,6 +133,7 @@ All configuration is environment based:
 | `DATA_DIR`               | `/data` | Directory for `watchdog.db` (SQLite)                |
 | `POLL_INTERVAL_SECONDS`  | `3600`  | Global background scan interval; per-source `scan_interval_seconds` overrides it |
 | `FETCH_TIMEOUT_SECONDS`  | `20`    | Per-source HTTP timeout                             |
+| `FETCH_MAX_BYTES`        | `2000000` | Maximum response body bytes read and stored per fetch (floored at `1024`); per-source `max_bytes` overrides it |
 | `BREAKER_THRESHOLD`      | `5`     | Consecutive scan failures before a source is tripped (minimum `1`) |
 | `BREAKER_COOLDOWN_SECONDS` | `1800` | Quarantine window after tripping a source (minimum `60`) |
 | `DISABLE_SCHEDULER`      | `false` | Disable background polling                          |
@@ -147,9 +157,9 @@ All configuration is environment based:
 | ------ | ------------------ | ----------------------------------------- |
 | GET    | `/healthz`         | Liveness / readiness probe                |
 | GET    | `/`                | HTML dashboard                            |
-| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `truncated`, `failure_count`, `breaker_until`) |
 | POST   | `/api/sources`     | Register a source (token protected)       |
-| GET    | `/api/sources/:id` | Fetch one source (incl. `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources/:id` | Fetch one source (incl. `extra_keywords`, `suppress_keywords`, `max_bytes`, `truncated`, `failure_count`, `breaker_until`) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's breaker state (token protected) |
 | DELETE | `/api/sources/:id` | Remove a source (token protected)         |
@@ -177,6 +187,7 @@ Register a source. The `POST /api/sources` payload accepts:
 | `notify_channels`  | no       | Channels that receive this source's alerts: a list of `console`, `slack`, `email`, `webhook` or `all` (default `all`) |
 | `notify_webhook_url` | no     | `http(s)` URL that overrides `WEBHOOK_URL` for this source's alerts and digests |
 | `scan_interval_seconds` | no  | Positive integer override for this source's polling cadence; omitted keeps the global `POLL_INTERVAL_SECONDS` |
+| `max_bytes`        | no       | Positive integer cap on the response body bytes read and stored for this source; omitted or `null` uses the global `FETCH_MAX_BYTES` |
 | `headers`          | no       | JSON object of header name to string value sent on every fetch (merged over the defaults; names normalized case-insensitively) |
 | `auth`             | no       | `"user:password"` HTTP Basic credentials; adds `Authorization: Basic <base64>` |
 | `extra_keywords`   | no       | List of terms that extend the relevance vocabulary for this source and raise a matching entry to `critical` (trimmed, lower-cased, default `[]`) |
@@ -295,6 +306,27 @@ enabled sources so a 15-minute source is not throttled by an hourly global
 timer. Both the per-source value and the global default are floored at 30
 seconds. A manual `POST /api/check` ignores the intervals and scans every
 enabled source in one run.
+
+`max_bytes` caps how much of a response body is read and stored for one source.
+It is a positive integer number of bytes; omitting it (or sending `null`) uses
+the deployment-wide `FETCH_MAX_BYTES` (default `2000000`, i.e. 2 MB, floored at
+`1024`). A zero, negative, non-integer, boolean or string value is rejected with
+a `400` naming the field. When a response advertises a `Content-Length` larger
+than the effective cap the fetch fails with a `FetchError` unless the caller
+opts in; the engine always opts in, so a clipped body is still parsed and the
+source is not treated as failed. A truncated scan logs a warning, reports
+`sources_truncated` (and `truncated_sources`) on the `POST /api/check` result and
+in `GET /api/stats`, sets the source's `truncated` flag, and shows a
+compact `truncated` badge in the dashboard's `Health` column without ever
+exposing the body.
+
+```sh
+# Cap one outsized feed at 512 KB while the deployment default stays at 2 MB.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Huge changelog","url":"https://api.acme.com/changelog.json",
+       "kind":"json","api_name":"Acme","max_bytes":524288}'
+```
 
 `headers` sends extra HTTP headers on every fetch of that source. It is a JSON
 object of string-to-string entries, merged over the default `User-Agent` and
@@ -551,7 +583,8 @@ runs as a non-root user with a read-only root filesystem, and persists SQLite
 data on a PVC. Digest mode is configured through `config.digestMode`,
 `config.digestIntervalSeconds` and `config.digestMaxAlerts` in `values.yaml`;
 the circuit breaker through `config.breakerThreshold` and
-`config.breakerCooldownSeconds`.
+`config.breakerCooldownSeconds`; and the fetch size cap through
+`config.fetchMaxBytes` (`FETCH_MAX_BYTES`).
 
 ```sh
 helm install watchdog deploy/helm/api-deprecation-watchdog \

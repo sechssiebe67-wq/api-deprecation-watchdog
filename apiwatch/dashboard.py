@@ -102,7 +102,14 @@ def render_dashboard(
         return "+%d / -%d" % (extras, suppressed)
 
     def _health_cell(source: Source) -> str:
-        """Render the breaker health without ever exposing headers/credentials."""
+        """Render the breaker health without ever exposing headers/credentials.
+
+        A source whose most recent scan was clipped at its byte cap gets a
+        compact ``truncated`` badge; the raw body is never rendered.
+        """
+        parts = []
+        if source.truncated:
+            parts.append('<span class="warning">truncated</span>')
         if source.breaker_until:
             try:
                 until = parse_iso8601(source.breaker_until)
@@ -110,19 +117,22 @@ def render_dashboard(
                 until = None
             if until is not None and until > now:
                 label = "tripped until %s" % until.strftime("%Y-%m-%d %H:%M UTC")
-                return (
+                parts.append(
                     '<span class="critical">%s</span> '
                     '<form method="post" action="/api/sources/%s/reset" '
                     'style="display:inline"><button type="submit">Reset</button>'
                     "</form>" % (_esc(label), _esc(source.id))
                 )
+                return " ".join(parts)
         if source.failure_count:
             noun = "failure" if source.failure_count == 1 else "failures"
-            return '<span class="warning">%s %s</span>' % (
-                _esc(source.failure_count),
-                noun,
+            parts.append(
+                '<span class="warning">%s %s</span>'
+                % (_esc(source.failure_count), noun)
             )
-        return '<span class="info">ok</span>'
+        if not parts:
+            return '<span class="info">ok</span>'
+        return " ".join(parts)
 
     if sources:
         source_rows = "".join(
