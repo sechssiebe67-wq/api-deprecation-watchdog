@@ -3,15 +3,29 @@
 Keeps all deployment knobs in one place so the rest of the code does not read
 ``os.environ`` directly.
 """
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import List, Optional
+
+log = logging.getLogger("apiwatch.config")
+
+DIGEST_MODES = ("off", "digest", "both")
+DIGEST_INTERVAL_MIN_SECONDS = 300
 
 
 def _bool(value: Optional[str], default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _digest_mode(value: Optional[str]) -> str:
+    mode = (value or "off").strip().lower()
+    if mode not in DIGEST_MODES:
+        log.warning("invalid DIGEST_MODE %r; falling back to 'off'", value)
+        return "off"
+    return mode
 
 
 @dataclass
@@ -32,6 +46,9 @@ class Config:
     smtp_to: List[str] = field(default_factory=list)
     smtp_starttls: bool = True
     seed_sources: bool = True
+    digest_mode: str = "off"
+    digest_interval_seconds: int = 86400
+    digest_max_alerts: int = 50
 
     @property
     def db_path(self) -> str:
@@ -62,4 +79,10 @@ class Config:
             smtp_to=recipients,
             smtp_starttls=_bool(env.get("SMTP_STARTTLS"), default=True),
             seed_sources=_bool(env.get("SEED_SOURCES"), default=True),
+            digest_mode=_digest_mode(env.get("DIGEST_MODE")),
+            digest_interval_seconds=max(
+                DIGEST_INTERVAL_MIN_SECONDS,
+                int(env.get("DIGEST_INTERVAL_SECONDS") or 86400),
+            ),
+            digest_max_alerts=max(1, int(env.get("DIGEST_MAX_ALERTS") or 50)),
         )

@@ -72,6 +72,7 @@ class Alert:
     title: str = ""
     link: str = ""
     notified: bool = False
+    digest_id: Optional[int] = None
     id: Optional[int] = None
     created_at: Optional[str] = None
 
@@ -87,5 +88,33 @@ class Alert:
             "title": self.title,
             "link": self.link,
             "notified": self.notified,
+            "digest_id": self.digest_id,
             "created_at": self.created_at,
+        }
+
+
+@dataclass
+class Digest:
+    """A grouped summary of pending alerts delivered on a slower cadence."""
+
+    alert_count: int = 0
+    severity: str = "info"
+    body: str = ""
+    subject: str = ""
+    omitted: int = 0
+    delivered: bool = False
+    alert_ids: List[int] = field(default_factory=list)
+    id: Optional[int] = None
+    created_at: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "created_at": self.created_at,
+            "alert_count": self.alert_count,
+            "severity": self.severity,
+            "delivered": self.delivered,
+            "subject": self.subject,
+            "body": self.body,
+            "omitted": self.omitted,
         }

@@ -11,7 +11,7 @@ from email.message import EmailMessage
 from typing import Dict, List, Sequence
 from urllib.request import Request, urlopen
 
-from .models import Alert
+from .models import Alert, Digest
 
 _SEVERITY_EMOJI = {"critical": "\U0001f6d1", "warning": "\u26a0\ufe0f", "info": "\u2139\ufe0f"}
 
@@ -38,6 +38,9 @@ class Notifier:
     def send(self, alerts: Sequence[Alert], source_names: Dict[int, str]) -> None:
         raise NotImplementedError
 
+    def send_digest(self, digest: Digest, source_names: Dict[int, str]) -> None:
+        raise NotImplementedError
+
 
 class ConsoleNotifier(Notifier):
     name = "console"
@@ -50,6 +53,11 @@ class ConsoleNotifier(Notifier):
     def send(self, alerts, source_names) -> None:
         for alert in alerts:
             self.stream.write(format_alert(alert, source_names.get(alert.source_id, "")) + "\n")
+
+    def send_digest(self, digest, source_names) -> None:
+        self.stream.write(digest.body)
+        if not digest.body.endswith("\n"):
+            self.stream.write("\n")
 
 
 class SlackNotifier(Notifier):
@@ -79,6 +87,26 @@ class SlackNotifier(Notifier):
         except NotificationError:
             raise
         except Exception as exc:  # network and parsing errors alike
+            raise NotificationError("slack delivery failed: %s" % exc) from exc
+
+    def send_digest(self, digest, source_names) -> None:
+        if not digest.body:
+            return
+        text_lines = ["*API Deprecation Watchdog digest*", "", digest.body]
+        payload = {"text": "\n".join(text_lines)}
+        request = Request(
+            self.webhook_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=10) as response:  # noqa: S310 (configured webhook)
+                if response.status >= 400:
+                    raise NotificationError("slack returned %s" % response.status)
+        except NotificationError:
+            raise
+        except Exception as exc:
             raise NotificationError("slack delivery failed: %s" % exc) from exc
 
 
@@ -115,6 +143,19 @@ class EmailNotifier(Notifier):
                 format_alert(alert, source_names.get(alert.source_id, "")) for alert in alerts
             )
         )
+        self._deliver(message)
+
+    def send_digest(self, digest, source_names) -> None:
+        if not self.recipients:
+            return
+        message = EmailMessage()
+        message["Subject"] = digest.subject or "API Deprecation Watchdog digest"
+        message["From"] = self.sender
+        message["To"] = ", ".join(self.recipients)
+        message.set_content(digest.body)
+        self._deliver(message)
+
+    def _deliver(self, message: EmailMessage) -> None:
         try:
             with smtplib.SMTP(self.host, self.port, timeout=15) as client:
                 if self.starttls:

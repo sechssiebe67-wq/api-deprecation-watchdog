@@ -78,6 +78,11 @@ config:
   disableScheduler: false
   seedSources: true
   logLevel: INFO
+  # off | digest | both. "digest" buffers alerts into scheduled summaries;
+  # "both" sends immediate alerts and also includes them in the next digest.
+  digestMode: "off"
+  digestIntervalSeconds: 86400
+  digestMaxAlerts: 50
 
 # Optional plain-text environment values.
 extraEnv: []

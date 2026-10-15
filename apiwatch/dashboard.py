@@ -6,7 +6,7 @@ the service works even without a template engine or asset pipeline.
 import html
 from typing import List
 
-from .models import Alert, Source
+from .models import Alert, Digest, Source
 
 _CSS = """
 :root { color-scheme: light dark; }
@@ -45,7 +45,13 @@ def _badge(severity: str) -> str:
     return '<span class="badge %s">%s</span>' % (severity, _esc(severity.upper()))
 
 
-def render_dashboard(stats: dict, sources: List[Source], alerts: List[Alert]) -> str:
+def render_dashboard(
+    stats: dict,
+    sources: List[Source],
+    alerts: List[Alert],
+    digests: List[Digest] = None,
+) -> str:
+    digests = digests or []
     cards = [
         ("sources", stats.get("sources", 0)),
         ("enabled", stats.get("sources_enabled", 0)),
@@ -53,6 +59,7 @@ def render_dashboard(stats: dict, sources: List[Source], alerts: List[Alert]) ->
         ("alerts", stats.get("alerts", 0)),
         ("critical", stats.get("alerts_critical", 0)),
         ("warning", stats.get("alerts_warning", 0)),
+        ("pending digest", stats.get("alerts_pending_digest", 0)),
     ]
     card_html = "".join(
         '<div class="card"><div class="num">%s</div><div class="label">%s</div></div>'
@@ -97,6 +104,20 @@ def render_dashboard(stats: dict, sources: List[Source], alerts: List[Alert]) ->
     else:
         alert_rows = '<tr><td colspan="4" class="muted">No alerts detected yet.</td></tr>'
 
+    if digests:
+        digest_rows = "".join(
+            "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+            % (
+                _esc(digest.created_at),
+                _esc(digest.alert_count),
+                _badge(digest.severity),
+                _esc("delivered" if digest.delivered else "pending"),
+            )
+            for digest in digests
+        )
+    else:
+        digest_rows = '<tr><td colspan="4" class="muted">No digests yet.</td></tr>'
+
     last_check = stats.get("last_check") or {}
     last_line = (
         "Last check: %s (%s sources, %s alerts, %s errors)"
@@ -128,12 +149,17 @@ def render_dashboard(stats: dict, sources: List[Source], alerts: List[Alert]) ->
     <thead><tr><th>Severity</th><th>Title</th><th class="col-hide">Reason</th><th class="col-hide">Detected</th></tr></thead>
     <tbody>%s</tbody>
   </table>
+  <h2>Recent digests</h2>
+  <table>
+    <thead><tr><th>Created</th><th>Alerts</th><th>Severity</th><th>Delivered</th></tr></thead>
+    <tbody>%s</tbody>
+  </table>
   <h2>Monitored sources</h2>
   <table>
     <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Status</th></tr></thead>
     <tbody>%s</tbody>
   </table>
-  <p class="muted">JSON API: <code>/api/sources</code>, <code>/api/alerts</code>, <code>/api/entries</code>, <code>/api/stats</code>, <code>/api/check</code> (POST).</p>
+  <p class="muted">JSON API: <code>/api/sources</code>, <code>/api/alerts</code>, <code>/api/entries</code>, <code>/api/digests</code>, <code>/api/stats</code>, <code>/api/check</code> (POST), <code>/api/digest/flush</code> (POST).</p>
 </main>
 </body>
 </html>
@@ -142,5 +168,6 @@ def render_dashboard(stats: dict, sources: List[Source], alerts: List[Alert]) ->
         last_line,
         card_html,
         alert_rows,
+        digest_rows,
         source_rows,
     )

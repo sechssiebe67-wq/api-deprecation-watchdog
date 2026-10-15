@@ -169,9 +169,25 @@ class WatchdogHandler(BaseHTTPRequestHandler):
             entries = self.store.list_entries(limit=limit, source_id=source_id)
             self._send_json(200, {"entries": [e.to_dict() for e in entries]})
             return
+        if method == "GET" and path == "/api/digests":
+            limit = _int_param(query, "limit", 100)
+            digests = self.store.list_digests(limit=limit)
+            self._send_json(200, {"digests": [d.to_dict() for d in digests]})
+            return
+        if method == "POST" and path == "/api/digest/flush":
+            self._flush_digest()
+            return
         if method == "POST" and path == "/api/check":
             self._run_check()
             return
+        if path.startswith("/api/digests/"):
+            digest_id = _parse_id(path.rsplit("/", 1)[-1])
+            if method == "GET":
+                digest = self.store.get_digest(digest_id)
+                if digest is None:
+                    raise ApiError(404, "digest not found")
+                self._send_json(200, digest.to_dict())
+                return
         if path.startswith("/api/sources/"):
             source_id = _parse_id(path.rsplit("/", 1)[-1])
             if method == "DELETE":
@@ -190,7 +206,8 @@ class WatchdogHandler(BaseHTTPRequestHandler):
         stats = self.store.stats()
         sources = self.store.list_sources()
         alerts = self.store.list_alerts(limit=50)
-        self._send_html(200, render_dashboard(stats, sources, alerts))
+        digests = self.store.list_digests(limit=20)
+        self._send_html(200, render_dashboard(stats, sources, alerts, digests))
 
     def _create_source(self) -> None:
         if not self._authorized():
@@ -225,6 +242,12 @@ class WatchdogHandler(BaseHTTPRequestHandler):
         payload = result.to_dict()
         payload["alerts"] = [a.to_dict() for a in result.alerts]
         self._send_json(200, payload)
+
+    def _flush_digest(self) -> None:
+        if not self._authorized():
+            raise ApiError(401, "unauthorized")
+        digest = self.engine.flush_digest()
+        self._send_json(200, {"digest": digest.to_dict() if digest else None})
 
 
 def _parse_id(value: str) -> int:
