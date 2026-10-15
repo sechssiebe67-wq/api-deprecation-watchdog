@@ -103,6 +103,27 @@ def analyze(entry: ParsedEntry, versions: List[str] = None, require_version: boo
     version_hits = _version_hits(text, versions)
 
     matched = critical + warning + info
+
+    if require_version and versions and not version_hits:
+        return Relevance(relevant=False, matched_terms=matched, version_hits=[])
+
+    # Structured adapters (e.g. the OpenAPI diff parser) know the severity from
+    # the change itself, so trust that explicit hint over keyword matching.
+    declared = getattr(entry, "severity", None)
+    if declared in _SEVERITY_RANK:
+        reason_parts = ["change: " + declared]
+        if matched:
+            reason_parts.append("matched: " + ", ".join(matched[:5]))
+        if version_hits:
+            reason_parts.append("versions: " + ", ".join(version_hits))
+        return Relevance(
+            relevant=True,
+            severity=declared,
+            reason="; ".join(reason_parts),
+            matched_terms=matched,
+            version_hits=version_hits,
+        )
+
     if critical:
         severity = "critical"
     elif warning:
@@ -111,9 +132,6 @@ def analyze(entry: ParsedEntry, versions: List[str] = None, require_version: boo
         severity = "info"
     else:
         return Relevance(relevant=False, matched_terms=matched, version_hits=version_hits)
-
-    if require_version and versions and not version_hits:
-        return Relevance(relevant=False, matched_terms=matched, version_hits=[])
 
     reason_parts = []
     if matched:

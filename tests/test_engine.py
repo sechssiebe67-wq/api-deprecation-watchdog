@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from apiwatch.engine import Engine, seed_default_sources
@@ -156,6 +157,100 @@ class EngineTests(unittest.TestCase):
         count = len(self.store.list_sources())
         seed_default_sources(self.store, default_sources())
         self.assertEqual(len(self.store.list_sources()), count)
+
+
+OPENAPI_URL = "https://api.acme.com/openapi.json"
+_OPENAPI_V1 = {
+    "openapi": "3.0.0",
+    "info": {"title": "Acme", "version": "1.0.0", "contact": {"url": "/support"}},
+    "paths": {
+        "/users": {
+            "get": {
+                "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer"}}],
+                "responses": {"200": {"description": "ok"}, "404": {"description": "nope"}},
+            }
+        },
+        "/legacy": {"get": {"responses": {"200": {"description": "ok"}}}},
+    },
+}
+_OPENAPI_V2 = {
+    "openapi": "3.0.0",
+    "info": {"title": "Acme", "version": "2.0.0", "contact": {"url": "/support"}},
+    "paths": {
+        "/users": {
+            "get": {
+                "parameters": [
+                    {"name": "limit", "in": "query", "schema": {"type": "integer"}},
+                    {"name": "org", "in": "query", "required": True, "schema": {"type": "string"}},
+                ],
+                "responses": {"200": {"description": "ok"}},
+            }
+        },
+        "/teams": {"get": {"responses": {"200": {"description": "ok"}}}},
+    },
+}
+OPENAPI_DOC = json.dumps({"versions": [_OPENAPI_V1, _OPENAPI_V2]})
+
+
+class OpenApiEngineTests(unittest.TestCase):
+    def setUp(self):
+        self.store = Store(":memory:")
+
+    def tearDown(self):
+        self.store.close()
+
+    def _engine(self, url):
+        return Engine(self.store, FakeFetcher({url: OPENAPI_DOC}))
+
+    def test_scan_reports_expected_severities(self):
+        source = self.store.add_source(
+            Source(name="Acme spec", url=OPENAPI_URL, kind="openapi", selector="versions")
+        )
+        result = self._engine(OPENAPI_URL).scan_source(source)
+        sev = {alert.title: alert.severity for alert in result.alerts}
+        self.assertEqual(result.alerts_created, 4)
+        self.assertEqual(sev["/legacy: removed path"], "critical")
+        self.assertEqual(sev["/teams: added path"], "info")
+        self.assertEqual(sev["GET /users: added required parameter"], "warning")
+        self.assertEqual(sev["GET /users: changed response status code set"], "critical")
+
+    def test_rescan_is_idempotent(self):
+        source = self.store.add_source(
+            Source(name="Acme spec", url=OPENAPI_URL, kind="openapi", selector="versions")
+        )
+        engine = self._engine(OPENAPI_URL)
+        engine.scan_source(source)
+        second = engine.scan_source(source)
+        self.assertEqual(second.entries_new, 0)
+        self.assertEqual(second.alerts_created, 0)
+        self.assertEqual(len(self.store.list_alerts()), 4)
+
+    def test_severity_floor_suppresses_info_changes(self):
+        source = self.store.add_source(
+            Source(
+                name="Acme spec",
+                url=OPENAPI_URL,
+                kind="openapi",
+                selector="versions",
+                min_severity="warning",
+            )
+        )
+        result = self._engine(OPENAPI_URL).scan_source(source)
+        self.assertEqual(result.entries_new, 4)
+        self.assertEqual(result.alerts_created, 3)
+        self.assertNotIn("info", [alert.severity for alert in result.alerts])
+        self.assertEqual(len(self.store.list_entries(source_id=source.id)), 4)
+
+    def test_malformed_openapi_records_error_without_aborting(self):
+        good_url = "https://example.com/feed"
+        self.store.add_source(Source(name="Good", url=good_url, kind="rss"))
+        self.store.add_source(Source(name="Bad spec", url=OPENAPI_URL, kind="openapi"))
+        fetcher = FakeFetcher({good_url: RSS, OPENAPI_URL: "definitely not json"})
+        result = Engine(self.store, fetcher).scan_all()
+        self.assertEqual(result.sources_checked, 2)
+        self.assertEqual(result.alerts_created, 1)
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn("malformed OpenAPI", result.errors[0])
 
 
 class DigestEngineTests(unittest.TestCase):
