@@ -286,6 +286,10 @@ notifier channels, so the *Integrations* / delivery-target and *Smarter
 relevance* items below are now partially shipped: the existing channels are
 usable per dependency without adding a new external integration.
 
+*Shipped:* **per-source history API** (see *Current capabilities*) —
+`GET /api/sources/:id/entries` exposes one dependency's stored entry history
+newest-first, a first step toward richer per-dependency history views.
+
 1. **More source adapters:** additional structured feeds beyond the shipped
    GitHub and GitLab releases and OpenAPI adapters. *Partially shipped:*
    the `gitlab` adapter now covers GitLab-hosted releases; further forges and
