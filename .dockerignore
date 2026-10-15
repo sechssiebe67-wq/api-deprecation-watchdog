@@ -1,0 +1,10 @@
+.git
+.gitignore
+.github
+tests
+deploy
+*.md
+__pycache__
+*.pyc
+.venv
+venv

@@ -1,0 +1,11 @@
+apiVersion: v2
+name: api-deprecation-watchdog
+description: Watches API changelogs and deprecation feeds and delivers prioritized alerts.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/anomalyco/opencode/issues
+sources:
+  - https://github.com/anomalyco/opencode/issues
+maintainers:
+  - name: API Deprecation Watchdog

@@ -1,70 +1,108 @@
-# Product Criteria
+# API Deprecation Watchdog
 
-## Hard Requirements (MUST)
+## Goal
 
-Every product must satisfy these requirements before the Salesman can approve its development.
+API Deprecation Watchdog is a lightweight, self-hosted service that watches the
+official changelogs, deprecation feeds and status pages of the external APIs and
+SDKs a team depends on. It extracts the changes that actually matter, scores them
+by how likely they are to break an existing integration, stores a full history,
+and pushes prioritized warnings into the channels developers already use
+(Slack, e-mail, and the built-in dashboard).
 
-- **Web Deployable:** Must run as a web application and be accessible through a browser.
-- **Originality:** Must not be a direct copy of an existing product, whether internally developed or commercially available. Existing concepts may be combined or significantly improved to create something unique.
-- **Expandable:** Must have an architecture that allows additional features and future improvements.
-- **Real User Value:** Must solve a real problem, provide entertainment, improve productivity, or offer another clearly identifiable benefit.
-- **Clearly Defined Audience:** Must have at least one identifiable target audience.
-- **Standalone:** Must function independently without requiring another AI Product Factory application.
-- **Autonomous Operation:** Must operate without continuous human intervention after deployment.
-- **Kubernetes Compatible:** Must be containerized and deployable on the existing k3s cluster using Helm and Argo CD.
-- **Resource Efficient:** Must stay within defined CPU, RAM, and storage budgets.
-- **Security:** Must follow basic security practices, including dependency scanning, safe secret handling, and input validation.
-- **Testable:** Must support automated testing and have measurable acceptance criteria.
-- **Maintainable:** Must contain readable source code, clear project structure, and sufficient technical documentation.
-- **Legal Compliance:** Must respect software licences, copyright, privacy regulations, and applicable laws.
-- **Health Monitoring:** Must expose a reliable way to verify whether the deployment is healthy.
-- **Unique Product Identity:** Must have a unique repository name, product name, and subdomain.
+The product exists because deprecations and breaking changes are usually
+announced in prose — buried in a changelog, a blog post or a dashboard banner —
+long before the breaking change ships. Teams find out too late, which causes
+unplanned outages and emergency migrations. The Watchdog turns that scattered,
+heterogeneous noise into a single prioritized alert stream.
 
-## Soft Requirements (SHOULD)
+## Intended users
 
-These requirements should influence the Salesman's evaluation and ranking.
+- **Platform / integration teams** in B2B SaaS companies that depend on several
+  third-party APIs and SDKs and have no central deprecation monitoring.
+- **On-call engineers** who want an early, low-noise signal before a dependency
+  breaks in production.
+- **Engineering leads** who need an auditable history of what changed, when it
+  was announced, and whether the team has been warned.
 
-- **Database Independence:** Should preferably work without a database. A database is allowed when persistent storage adds meaningful value.
-- **Monetization Potential:** Should have a realistic path to revenue, such as subscriptions, advertisements, one-time purchases, or paid features.
-- **Low Operating Costs:** Should require minimal infrastructure, external APIs, and paid services.
-- **Fast MVP Development:** Should ideally have a deployable minimum viable product within a limited development budget.
-- **Low Maintenance:** Should require minimal ongoing maintenance and manual administration.
-- **Market Differentiation:** Should offer a meaningful advantage over existing alternatives.
-- **Growth Potential:** Should be able to attract additional users without a proportional increase in operating costs.
-- **User Retention:** Should provide reasons for users to return regularly.
-- **Discoverability:** Should be understandable, searchable, and easy to share.
-- **Mobile Friendly:** Should work well on smartphones, tablets, and desktop browsers.
-- **Accessibility:** Should follow established accessibility principles.
-- **Minimal Dependencies:** Should avoid unnecessary external services and vendor lock-in.
-- **Measurable Success:** Should provide metrics that help evaluate adoption, reliability, and product value.
-- **Reusability:** Should preferably reuse existing components, design patterns, and deployment templates.
-- **Innovation Potential:** Should have opportunities for unique features or future experimentation.
+## Value proposition
 
-## Product Rejection Criteria
+- Deprecation-focused detection instead of generic uptime/API monitoring.
+- Rule-based extraction from heterogeneous sources (RSS, HTML, JSON).
+- Relevance filtering against the API versions a team actually uses, so the
+  signal stays small.
+- Delivery into existing developer workflows; no agent installation required.
 
-The Salesman must reject a product idea if:
+## Current capabilities (MVP increment)
 
-- It is merely a clone without meaningful differentiation.
-- Its purpose or target audience cannot be explained clearly.
-- It cannot run within the available infrastructure budget.
-- It requires unavailable credentials, licences, hardware, or external services.
-- It introduces unacceptable security, legal, or privacy risks.
-- It has no realistic path to a working MVP.
-- It requires continuous manual operation.
-- It offers no meaningful advantage over an already active product.
-- Its projected value does not justify its development and operating costs.
+- **Source registry:** add, list and remove monitored sources with a kind
+  (`rss`, `html`, `json`), an API name and the tracked versions.
+- **Parsers:** built-in parsers for RSS/Atom XML, JSON changelogs (several
+  common shapes) and HTML changelogs (headings + following content), all
+  dependency-free.
+- **Relevance engine:** detects deprecation / breaking-change language
+  (`deprecated`, `sunset`, `end of life`, `removed`, `breaking`, …) and boosts
+  entries that mention a tracked version. Classifies each hit as
+  `critical`, `warning` or `info`.
+- **Persistence:** SQLite store with de-duplication by content hash, so the same
+  announcement is only alerted once.
+- **Notifications:** Slack incoming webhook, SMTP e-mail and a console channel;
+  channels are optional and enabled through configuration.
+- **Web dashboard:** an accessible overview of sources, recent alerts and scan
+  statistics, plus a JSON API.
+- **Operations:** HTTP server on port `8080`, `GET /healthz`, background polling
+  scheduler, optional bearer-token protection for mutating endpoints, non-root
+  container, Helm chart, and a `linux/amd64` + `linux/arm64` image.
 
-## Product Lifecycle Requirements
+## HTTP API
 
-Every approved product must support:
+| Method | Path              | Purpose                                   |
+| ------ | ----------------- | ----------------------------------------- |
+| GET    | `/healthz`        | Liveness/readiness probe                  |
+| GET    | `/`               | HTML dashboard                            |
+| GET    | `/api/sources`    | List monitored sources                    |
+| POST   | `/api/sources`    | Register a source (token protected)       |
+| DELETE | `/api/sources/:id`| Remove a source (token protected)         |
+| GET    | `/api/alerts`     | List alerts, newest first                 |
+| GET    | `/api/entries`    | List parsed changelog entries             |
+| POST   | `/api/check`      | Run a scan now (token protected)          |
+| GET    | `/api/stats`      | Aggregate counters                        |
 
-1. **Creation:** A dedicated GitHub repository is created.
-2. **Development:** The AI Developer implements the MVP.
-3. **Review:** Automated testing and AI code review validate the product.
-4. **Deployment:** Helm and GitOps configuration deploy the application.
-5. **Monitoring:** Operational health and product performance are evaluated.
-6. **Iteration:** The product can receive additional features and improvements.
-7. **Archival:** The repository is preserved while the deployment and Helm chart are removed.
-8. **Reactivation:** An archived product can be rebuilt and deployed again if its potential improves.
+## Next direction
 
-The maximum number of simultaneously active product repositories is **10**.
+1. **More source adapters:** GitHub releases, OpenAPI diff detection and
+   statuspage.io JSON, plus per-source selectors to make HTML extraction more
+   precise.
+2. **Smarter relevance:** semantic matching of version ranges (semver / date
+   versions) and per-team severity rules.
+3. **Integrations:** GitHub/GitLab issues and Jira as delivery targets, plus
+   digest notifications.
+4. **Multi-tenant onboarding:** organizations, API keys and shared source
+   templates for the manual concierge phase.
+5. **Metrics export:** Prometheus endpoint for adoption and reliability
+   monitoring.
+
+## Architecture
+
+```
+sources ──▶ fetcher ──▶ parsers ──▶ relevance ──▶ store (SQLite)
+                                              └─▶ notifiers (Slack / e-mail / console)
+                                                        ▲
+HTTP API + dashboard ──▶ engine (scan) ──▶ scheduler (background poll)
+```
+
+The design keeps a hard separation between I/O (`fetcher`), pure logic
+(`parsers`, `relevance`), state (`store`), side effects (`notify`) and the
+wiring (`engine`, `app`). This keeps the core testable offline with a fake
+fetcher and no network access.
+
+## Constraints and risks
+
+- Depends on the structure and availability of external changelog sources;
+  parsing is heuristic and can degrade when a source changes layout.
+- Source formats vary widely, which is why per-source kinds and future selectors
+  exist.
+- Teams may ignore deprecation warnings; prioritization and low noise are the
+  mitigation.
+- Integrating with private repositories or trackers raises access/privacy
+  questions; the MVP deliberately keeps credentials in the deployment
+  environment only.
