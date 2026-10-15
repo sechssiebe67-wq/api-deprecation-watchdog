@@ -382,8 +382,11 @@ class WatchdogHandler(BaseHTTPRequestHandler):
             return
         if method == "GET" and path == "/api/entries":
             limit = _int_param(query, "limit", 100)
+            offset = _offset_param(query)
             source_id = _int_param(query, "source_id", None)
-            entries = self.store.list_entries(limit=limit, source_id=source_id)
+            entries = self.store.list_entries(
+                limit=limit, source_id=source_id, offset=offset
+            )
             self._send_json(200, {"entries": [e.to_dict() for e in entries]})
             return
         if method == "GET" and path == "/api/digests":
@@ -415,7 +418,8 @@ class WatchdogHandler(BaseHTTPRequestHandler):
             if self.store.get_source(source_id) is None:
                 raise ApiError(404, "source not found")
             limit = _int_param(query, "limit", 100)
-            entries = self.store.list_entries_for_source(source_id, limit)
+            offset = _offset_param(query)
+            entries = self.store.list_entries_for_source(source_id, limit, offset)
             self._send_json(200, {"entries": [e.to_dict() for e in entries]})
             return
         if path.startswith("/api/sources/") and path.endswith("/reset"):
@@ -551,6 +555,24 @@ def _int_param(query: dict, key: str, default: Optional[int]):
         return int(query[key][0])
     except (TypeError, ValueError):
         raise ApiError(400, "invalid %s" % key)
+
+
+def _offset_param(query: dict, default: int = 0) -> int:
+    """Resolve the optional non-negative ``?offset=`` or raise ``invalid offset``.
+
+    Omitted means ``0``, so the default page is byte-for-byte unchanged. A
+    non-integer (including ``abc``, ``1.5`` or ``true``) or negative value is
+    rejected with a ``400`` naming ``offset``.
+    """
+    if "offset" not in query:
+        return default
+    try:
+        offset = int(query["offset"][0])
+    except (TypeError, ValueError):
+        raise ApiError(400, "invalid offset")
+    if offset < 0:
+        raise ApiError(400, "invalid offset")
+    return offset
 
 
 def _export_limit(query: dict) -> int:

@@ -247,15 +247,46 @@ def _extract_categories(item: dict) -> List[str]:
     return result
 
 
+def _selector_index(part: str):
+    """Return the list index for a selector segment, or ``None`` if not one.
+
+    Only canonical integer segments qualify: ``0``, ``1``, … index from the
+    front and ``-1`` addresses the last element. Anything else (including
+    ``+1``, ``1.0``, an empty segment or a key name) is not an index.
+    """
+    if part.startswith("+"):
+        return None
+    try:
+        return int(part)
+    except (TypeError, ValueError):
+        return None
+
+
 def _apply_selector(data, selector: str):
-    """Very small dotted-path selector, e.g. ``data.releases``."""
+    """Walk a dotted path such as ``data.releases`` or ``data.changelogs.0``.
+
+    A dict segment looks up that key. A list segment must be an integer index
+    (``0``, ``1``, … or ``-1`` for the last element); a non-integer segment on
+    a list, an out-of-range index, or any index on a dict yields ``None`` so the
+    caller produces no entries, exactly as an unknown key does.
+    """
     current = data
     for part in selector.split("."):
         if isinstance(current, dict):
-            current = current.get(part)
+            if _selector_index(part) is not None or part not in current:
+                return None
+            current = current[part]
+        elif isinstance(current, list):
+            index = _selector_index(part)
+            if index is None:
+                return None
+            try:
+                current = current[index]
+            except IndexError:
+                return None
         else:
-            return []
-    return current if current is not None else []
+            return None
+    return current
 
 
 # --------------------------------------------------------------------------- #
