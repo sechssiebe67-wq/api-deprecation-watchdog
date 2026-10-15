@@ -4,7 +4,7 @@ import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from apiwatch.app import create_server, validate_source_payload
+from apiwatch.app import ApiError, create_server, validate_source_payload
 from apiwatch.config import Config
 from apiwatch.engine import Engine
 from apiwatch.fetcher import FakeFetcher
@@ -126,6 +126,23 @@ class OpenAppTests(AppTestCase):
         status, body = self.request("GET", "/")
         self.assertEqual(status, 200)
         self.assertIn("API Deprecation Watchdog", body)
+
+    def test_dashboard_shows_keyword_indicator(self):
+        self.request(
+            "POST",
+            "/api/sources",
+            {
+                "name": "Tuned",
+                "url": FEED_URL,
+                "kind": "rss",
+                "extra_keywords": ["retired", "eol"],
+                "suppress_keywords": ["notice"],
+            },
+        )
+        status, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn("Keywords", body)
+        self.assertIn("+2 / -1", body)
 
     def test_create_and_list_source(self):
         status, body = self.request(
@@ -254,6 +271,89 @@ class OpenAppTests(AppTestCase):
             )
             self.assertEqual(status, 400)
             self.assertIn("auth", json.loads(body)["error"])
+
+    def test_validate_source_keywords_default_to_empty(self):
+        source = validate_source_payload(
+            {"name": "Plain", "url": FEED_URL, "kind": "rss"}
+        )
+        self.assertEqual(source.extra_keywords, [])
+        self.assertEqual(source.suppress_keywords, [])
+
+    def test_validate_source_keywords_normalize_case_and_whitespace(self):
+        source = validate_source_payload(
+            {
+                "name": "Tuned",
+                "url": FEED_URL,
+                "kind": "rss",
+                "extra_keywords": ["  Retired  ", "EOL", "retired"],
+                "suppress_keywords": ["Notice"],
+            }
+        )
+        self.assertEqual(source.extra_keywords, ["retired", "eol"])
+        self.assertEqual(source.suppress_keywords, ["notice"])
+
+    def test_validate_source_keywords_reject_bad_values(self):
+        for field in ("extra_keywords", "suppress_keywords"):
+            for value in ("not-a-list", [1], ["ok", 2], [""], ["   "]):
+                with self.assertRaises(ApiError) as ctx:
+                    validate_source_payload(
+                        {"name": "Bad", "url": FEED_URL, "kind": "rss", field: value}
+                    )
+                self.assertEqual(ctx.exception.status, 400)
+                self.assertIn(field, ctx.exception.message)
+
+    def test_create_source_keywords_round_trip(self):
+        status, body = self.request(
+            "POST",
+            "/api/sources",
+            {
+                "name": "Tuned",
+                "url": FEED_URL,
+                "kind": "rss",
+                "extra_keywords": ["retired", "eol"],
+                "suppress_keywords": ["notice"],
+            },
+        )
+        self.assertEqual(status, 201)
+        source = json.loads(body)
+        self.assertEqual(source["extra_keywords"], ["retired", "eol"])
+        self.assertEqual(source["suppress_keywords"], ["notice"])
+
+        status, body = self.request("GET", "/api/sources/%d" % source["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["extra_keywords"], ["retired", "eol"])
+        self.assertEqual(json.loads(body)["suppress_keywords"], ["notice"])
+
+        status, body = self.request("GET", "/api/sources")
+        self.assertEqual(status, 200)
+        listed = json.loads(body)["sources"][0]
+        self.assertEqual(listed["extra_keywords"], ["retired", "eol"])
+        self.assertEqual(listed["suppress_keywords"], ["notice"])
+
+    def test_create_source_default_keywords_are_empty(self):
+        status, body = self.request(
+            "POST", "/api/sources", {"name": "Plain", "url": FEED_URL, "kind": "rss"}
+        )
+        self.assertEqual(status, 201)
+        source = json.loads(body)
+        self.assertEqual(source["extra_keywords"], [])
+        self.assertEqual(source["suppress_keywords"], [])
+
+    def test_invalid_keywords_rejected_over_http(self):
+        status, body = self.request(
+            "POST",
+            "/api/sources",
+            {
+                "name": "Bad",
+                "url": FEED_URL,
+                "kind": "rss",
+                "extra_keywords": "not-a-list",
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            json.loads(body)["error"], "'extra_keywords' must be a list of strings"
+        )
 
     def test_statuspage_source_and_check(self):
         self.fetcher.responses[STATUS_URL] = STATUSPAGE

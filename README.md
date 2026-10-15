@@ -41,6 +41,14 @@ actually use.
 - **Per-source severity floor**: each source has a `min_severity` (default
   `info`) that suppresses alerts below the chosen level while still recording
   the entries.
+- **Per-source keyword overrides**: each source can carry `extra_keywords` and
+  `suppress_keywords` lists that extend or mute the relevance vocabulary for
+  that dependency alone — for example `["retired", "eol"]` or
+  `["end of support"]` for a vendor that never says "end of life", and a term
+  such as `"notice"` to silence it. Extra terms are matched case-insensitively
+  and raise an entry to `critical`; suppressed terms are removed before
+  classification. Both default to `[]`, which preserves the built-in
+  vocabulary exactly.
 - **Per-source scan intervals**: each source has an optional
   `scan_interval_seconds` that overrides the global `POLL_INTERVAL_SECONDS`
   cadence, so a volatile dependency can be polled every 15 minutes while a
@@ -74,9 +82,11 @@ actually use.
   ordered summary on a configurable cadence (`off`, `digest` or `both`).
 - **Web dashboard** with an `Interval` column showing each source's cadence (or
   the global default), an `Auth` column showing a lock/header-count indicator
-  (never the secret values), a `Health` column (`ok`, `N failures` or
-  `tripped until <time>` with a `Reset` action), a JSON API and a
-  `Download JSON` link that snapshots the full state through `/api/export`.
+  (never the secret values), a `Keywords` column showing a compact
+  `+extra / -suppressed` count (`–` when both lists are empty), a `Health`
+  column (`ok`, `N failures` or `tripped until <time>` with a `Reset` action), a
+  JSON API and a `Download JSON` link that snapshots the full state through
+  `/api/export`.
 - **JSON data export**: a read-only `GET /api/export` returns one document with
   `generated_at`, `stats`, `sources`, `entries`, `alerts` and `digests` for
   offline analysis, incident reports or feeding other tools. An optional
@@ -137,9 +147,9 @@ All configuration is environment based:
 | ------ | ------------------ | ----------------------------------------- |
 | GET    | `/healthz`         | Liveness / readiness probe                |
 | GET    | `/`                | HTML dashboard                            |
-| GET    | `/api/sources`     | List monitored sources (incl. `failure_count`, `breaker_until`) |
+| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`) |
 | POST   | `/api/sources`     | Register a source (token protected)       |
-| GET    | `/api/sources/:id` | Fetch one source (incl. `failure_count`, `breaker_until`) |
+| GET    | `/api/sources/:id` | Fetch one source (incl. `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's breaker state (token protected) |
 | DELETE | `/api/sources/:id` | Remove a source (token protected)         |
@@ -169,6 +179,8 @@ Register a source. The `POST /api/sources` payload accepts:
 | `scan_interval_seconds` | no  | Positive integer override for this source's polling cadence; omitted keeps the global `POLL_INTERVAL_SECONDS` |
 | `headers`          | no       | JSON object of header name to string value sent on every fetch (merged over the defaults; names normalized case-insensitively) |
 | `auth`             | no       | `"user:password"` HTTP Basic credentials; adds `Authorization: Basic <base64>` |
+| `extra_keywords`   | no       | List of terms that extend the relevance vocabulary for this source and raise a matching entry to `critical` (trimmed, lower-cased, default `[]`) |
+| `suppress_keywords`| no       | List of terms removed from the matched set before classification, so a noisy phrase can be muted per source (trimmed, lower-cased, default `[]`) |
 
 For `html`, `selector` is a CSS-like simple selector (optional tag, `#id`,
 `.class`, or a combination). It matches a block when the block or an ancestor
@@ -304,6 +316,30 @@ rendered in the dashboard (which shows only a lock/header-count indicator).
 > text and are returned by the API. Protect the data volume, set `API_TOKEN`
 > and restrict network access to the service just as you would for any other
 > secret.
+
+`extra_keywords` and `suppress_keywords` tune the relevance vocabulary for one
+source. Each is an optional list of non-empty strings (default `[]`, which keeps
+the built-in vocabulary unchanged). Terms are trimmed and lower-cased when the
+source is registered, and a non-list value or a non-string/blank entry is
+rejected with `400 {"error": "'extra_keywords' must be a list of strings"}` (the
+message names the offending field). `extra_keywords` extends the built-in
+critical terms: an entry that would otherwise be low-signal is raised to
+`critical` when it contains one of the terms (matched case-insensitively on word
+boundaries). `suppress_keywords` removes the matching built-in terms *before*
+classification, so an entry whose only match was suppressed is no longer
+relevant and creates no alert. Both fields are persisted in the `sources` table
+and returned by `GET /api/sources` and `GET /api/sources/:id`; databases created
+before this feature are migrated automatically and read back as `[]`.
+
+```sh
+# A vendor that says "end of support" and "EOL" rather than "end of life":
+# promote those terms and mute the recurring "notice" noise.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Vendor SDK","url":"https://vendor.example/changelog.json",
+       "kind":"json","api_name":"Vendor","tracked_versions":["v2"],
+       "extra_keywords":["retired","eol"],"suppress_keywords":["notice"]}'
+```
 
 `GET /api/sources/:id/entries` returns the entries recorded for one source,
 newest first (ordered by `created_at` then `id`, both descending) and capped by

@@ -41,7 +41,9 @@ heterogeneous noise into a single prioritized alert stream.
   name, the tracked versions and an optional per-source selector. Each source
   may also carry custom HTTP `headers` and a convenience `auth`
   (`"user:password"`) so authenticated and otherwise gated feeds can be
-  monitored without forking the service.
+  monitored without forking the service, plus optional `extra_keywords` and
+  `suppress_keywords` lists that extend or mute the relevance vocabulary for
+  that dependency.
 - **Parsers:** built-in parsers for RSS/Atom XML, JSON changelogs (several
   common shapes), HTML changelogs (headings + following content),
   statuspage.io JSON (`incidents` + `scheduled_maintenances`), GitHub
@@ -93,6 +95,17 @@ heterogeneous noise into a single prioritized alert stream.
   entries that mention a tracked version. Classifies each hit as
   `critical`, `warning` or `info`, a ladder where `critical` ranks highest and
   `info` lowest.
+- **Per-source keyword overrides:** every source optionally carries
+  `extra_keywords` and `suppress_keywords`, two lists of strings that tune the
+  relevance vocabulary for that dependency alone. An `extra_keywords` term — for
+  example a vendor that writes `"end of support"` instead of `"end of life"` —
+  is matched case-insensitively on the same word boundaries as the built-in
+  terms and raises an otherwise low-signal entry to `critical`, while a
+  `suppress_keywords` term is removed from the matched set before
+  classification, so a source can mute a noisy phrase without losing the rest
+  of the vocabulary. Both lists default to `[]`, in which case the engine
+  behaves exactly as before the feature existed; terms are trimmed and
+  lower-cased on registration and stored JSON-encoded in the `sources` table.
 - **Per-source severity floor:** every source carries a `min_severity`
   (`critical`, `warning` or `info`, default `info`). The engine classifies and
   stores every matched entry regardless, but only creates an alert when the
@@ -140,10 +153,11 @@ heterogeneous noise into a single prioritized alert stream.
 - **Persistence:** SQLite store with de-duplication by content hash, so the same
   announcement is only alerted once. The source table stores
   `scan_interval_seconds`, `headers` (JSON text), `auth` (text),
+  `extra_keywords` and `suppress_keywords` (JSON text),
   `failure_count` (integer, default `0`) and `breaker_until` (text), and a
   lightweight migration adds each column to databases created before it existed,
-  leaving old rows at `NULL`/empty/`0` (read back as `{}` / `None` / `0` /
-  `None`).
+  leaving old rows at `NULL`/empty/`0` (read back as `{}` / `None` / `[]` /
+  `0` / `None`).
 - **Per-source history API:** each source's recorded entries are browsable
   newest-first through `GET /api/sources/:id/entries` (optional `?limit=`,
   default `100`), so the stored history of one dependency can be inspected
@@ -211,8 +225,8 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `headers`, `auth`, `failure_count`, `breaker_until`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `headers` and `auth` (token protected) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
 | GET    | `/api/sources/:id`| Fetch one source (incl. breaker fields)   |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's `failure_count` and `breaker_until` (token protected) |
@@ -289,6 +303,41 @@ change. It means different things per kind:
 Every source also accepts an optional `min_severity` (`critical`, `warning` or
 `info`, default `info`). An entry is only turned into an alert when its severity
 ranks at or above this floor; lower-severity entries are still parsed and stored.
+
+## Keyword overrides
+
+The optional `extra_keywords` and `suppress_keywords` lists on a source tune the
+relevance vocabulary for that dependency only, so a vendor that says `"will be
+retired"`, `"EOL"` or an internal term the built-ins do not know can be detected
+without forking the service:
+
+- `extra_keywords` — terms that extend the built-in critical vocabulary. Each
+  term is matched case-insensitively on the same word boundaries as the built-in
+  terms (so `retired` does not match inside `retirement`-style surprises), and a
+  match raises an otherwise low-signal entry to `critical`.
+- `suppress_keywords` — terms removed from the matched set *before*
+  classification. A source whose entries always say `"notice"` can mute that
+  word, and an entry whose only match was suppressed becomes non-relevant and
+  produces no alert.
+
+Both fields are optional lists of non-empty strings; omitted means `[]`. Values
+are trimmed and lower-cased on registration, and a non-list value or a
+non-string/blank entry is rejected with
+`400 {"error": "'extra_keywords' must be a list of strings"}` (naming the
+offending field). Both lists are stored JSON-encoded in the `sources` table and
+returned by `GET /api/sources` and `GET /api/sources/:id`; old databases are
+migrated automatically and read back as `[]`. With both lists empty the engine,
+alerts and stored entries are identical to before the feature existed.
+
+```sh
+# Vendor that writes "end of support": promote it to critical, and mute "notice".
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Vendor SDK","url":"https://vendor.example/changelog.json","kind":"json",
+       "api_name":"Vendor","tracked_versions":["v2"],
+       "extra_keywords":["retired","eol","end of support"],
+       "suppress_keywords":["notice"]}'
+```
 
 ## Scan cadence
 
@@ -546,6 +595,15 @@ a token-free, read-only `GET /api/export` that returns one JSON snapshot of
 This gives teams an offline-analysis and incident-report path without a custom
 client and is a first step toward the *Metrics export* item below.
 
+*Shipped:* **per-source keyword overrides** (see *Current capabilities* and
+*Keyword overrides*) — optional `extra_keywords` and `suppress_keywords` lists
+on each source that extend or mute the relevance vocabulary for that dependency,
+so a vendor that uses `"EOL"`, `"retired"` or an internal phrase is detected
+without forking the service and a noisy term can be silenced without losing the
+rest of the vocabulary. Both lists default to `[]`, preserving the legacy
+behaviour exactly. This is the next increment on top of the relevance engine and
+advances the *Smarter relevance* item below.
+
 1. **More source adapters:** additional structured feeds beyond the shipped
    GitHub and GitLab releases and OpenAPI adapters. *Partially shipped:*
    the `gitlab` adapter now covers GitLab-hosted releases; further forges and
@@ -553,7 +611,9 @@ client and is a first step toward the *Metrics export* item below.
 2. **Smarter relevance:** semantic matching of version ranges (semver / date
    versions), per-team severity rules and richer keyword tuning. *Partially
    shipped:* per-source `min_severity` and `notify_channels` already let a team
-   tune the volume and destination of alerts per dependency.
+   tune the volume and destination of alerts per dependency, and the shipped
+   per-source `extra_keywords` / `suppress_keywords` overrides let a team extend
+   or mute the detection vocabulary without forking the service.
 3. **Integrations:** GitHub/GitLab issues and Jira as delivery targets.
    *Partially shipped:* per-source `notify_channels` routes alerts to the
    existing Slack, e-mail, console and generic `webhook` channels, and the
