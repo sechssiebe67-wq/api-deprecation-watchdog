@@ -1,0 +1,87 @@
+name: Factory Release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: factory-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: read
+
+jobs:
+  release:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Select latest merged product revision
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=100" --jq '[.[] | select(.merged_at != null)] | sort_by(.merged_at) | reverse | .[0].merge_commit_sha' | head -n 1)
+          [[ "$sha" =~ ^[a-f0-9]{40}$ ]] || { echo 'No merged product revision'; exit 1; }
+          git checkout --detach "$sha"
+          if [ ! -f Dockerfile ]; then
+            echo 'No Dockerfile yet; waiting for product implementation.'
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mapfile -t charts < <(find deploy/helm -mindepth 2 -maxdepth 2 -name Chart.yaml -print)
+          [ "${#charts[@]}" -eq 1 ] || { echo 'Expected exactly one deploy/helm/*/Chart.yaml'; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "chart=$(dirname "${charts[0]}")" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo 'ready=true' >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+        if: steps.source.outputs.ready == 'true'
+      - uses: docker/setup-buildx-action@v3
+        if: steps.source.outputs.ready == 'true'
+      - uses: docker/login-action@v3
+        if: steps.source.outputs.ready == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.TAMBINOS_PAT }}
+      - uses: docker/build-push-action@v6
+        id: image
+        if: steps.source.outputs.ready == 'true'
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.source.outputs.image }}:${{ steps.source.outputs.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+          provenance: true
+          sbom: true
+      - name: Publish immutable factory release
+        if: steps.source.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          IMAGE: ${{ steps.source.outputs.image }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+          CHART: ${{ steps.source.outputs.chart }}
+        run: |
+          set -euo pipefail
+          tag="factory-$SOURCE_SHA"
+          jq -n --arg sourceRepository "$GITHUB_REPOSITORY" --arg sourceCommit "$SOURCE_SHA" --arg imageRepository "$IMAGE" --arg imageDigest "$DIGEST" --arg chartPath "$CHART" '{sourceRepository:$sourceRepository,sourceCommit:$sourceCommit,imageRepository:$imageRepository,imageDigest:$imageDigest,chartPath:$chartPath}' > "$RUNNER_TEMP/factory-release.json"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo 'Release already published; preserving its immutable digest.'
+          else
+            gh release create "$tag" --target "$SOURCE_SHA" --title "$tag" --notes-file "$RUNNER_TEMP/factory-release.json"
+          fi
