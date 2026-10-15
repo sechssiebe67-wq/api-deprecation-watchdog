@@ -79,10 +79,15 @@ def render_dashboard(
 
     def _interval_label(source: Source) -> str:
         if source.scan_interval_seconds is not None:
-            return "%ss" % source.scan_interval_seconds
-        if default_interval is not None:
-            return "%ss (global)" % default_interval
-        return "global"
+            label = "%ss" % source.scan_interval_seconds
+        elif default_interval is not None:
+            label = "%ss (global)" % default_interval
+        else:
+            label = "global"
+        if source.scan_jitter_seconds:
+            # Show the deterministic offset window, e.g. ``3600s +0-300s``.
+            label += " +0-%ds" % source.scan_jitter_seconds
+        return label
 
     def _auth_indicator(source: Source) -> str:
         """A compact lock/header-count badge that never reveals secret values."""

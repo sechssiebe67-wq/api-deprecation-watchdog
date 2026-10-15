@@ -10,9 +10,17 @@ Each source can override the global cadence with ``scan_interval_seconds``. The
 scheduler remembers when it last scanned every source and only scans a source
 once its *effective* interval has elapsed: ``source.scan_interval_seconds`` when
 set, otherwise the global ``POLL_INTERVAL_SECONDS``. Sources without an override
-therefore keep the original behaviour. Because a source may be due more often
-than the global interval, the loop wakes up at the smallest effective interval
-among the enabled sources rather than always waiting the global interval.
+therefore keep the original behaviour.
+
+A source may also set ``scan_jitter_seconds``, a non-negative window from which a
+deterministic, id-derived offset is added to its due time so a large registry
+spreads its polls instead of firing every source on the same tick. The offset is
+stable (never random), so schedules stay reproducible and testable, and with no
+jitter set the due times and wake-ups are identical to the pre-feature
+scheduler. The loop wakes up at the smallest effective *due time* among the
+enabled, non-tripped sources rather than always waiting the global interval, so
+a jittered source is not scanned early and the loop does not busy-loop while it
+waits.
 """
 import logging
 import threading
@@ -62,11 +70,37 @@ class Scheduler:
             return self.interval
         return max(MIN_SCAN_INTERVAL_SECONDS, int(interval))
 
-    def due_sources(self, now: Optional[float] = None) -> List:
-        """Return the enabled sources whose effective interval has elapsed.
+    def jitter_offset(self, source) -> int:
+        """Return ``source``'s deterministic jitter offset in seconds.
 
-        A source that has never been scanned is always due, so the first tick
-        covers the whole registry.
+        The offset lies in ``[0, scan_jitter_seconds]`` and is derived from the
+        source id (``id % (jitter + 1)``), so many sources that share the same
+        effective interval no longer fire on the same scheduler tick. It is
+        stable for a given source and jitter — never random — which keeps the
+        spread reproducible and testable. With no jitter set the offset is ``0``
+        and the scheduler behaves exactly as before the feature existed.
+        """
+        jitter = source.scan_jitter_seconds or 0
+        if jitter <= 0:
+            return 0
+        source_id = source.id if source.id is not None else 0
+        return source_id % (jitter + 1)
+
+    def due_at(self, source, last: float) -> float:
+        """The absolute time ``source`` next becomes due after scanning at ``last``.
+
+        This is ``last_scan + effective_interval + jitter``; with no jitter the
+        offset is ``0`` so the result matches the original cadence exactly.
+        """
+        return last + self.effective_interval(source) + self.jitter_offset(source)
+
+    def due_sources(self, now: Optional[float] = None) -> List:
+        """Return the enabled sources whose effective due time has elapsed.
+
+        A source is due once
+        ``last_scan + effective_interval + jitter`` has passed. A source that has
+        never been scanned is always due, so the first tick covers the whole
+        registry.
         """
         now = self._clock() if now is None else now
         due = []
@@ -75,7 +109,7 @@ class Scheduler:
                 # A quarantined source is not scanned until its breaker expires.
                 continue
             last = self._last_scan.get(source.id)
-            if last is None or now - last >= self.effective_interval(source):
+            if last is None or now >= self.due_at(source, last):
                 due.append(source)
         return due
 
@@ -89,18 +123,31 @@ class Scheduler:
                 self._last_scan[source.id] = now
         return result
 
-    def _sleep_seconds(self) -> float:
-        """Wake often enough to honour the smallest enabled effective interval.
+    def _sleep_seconds(self, now: Optional[float] = None) -> float:
+        """Wake so the loop hits the smallest effective due time among sources.
 
-        Tripped sources are ignored: their (potentially long) remaining cooldown
-        must not stop the loop from waking for the healthy sources.
+        Each source's remaining wait is its effective interval plus its jitter
+        offset, less the time already elapsed since it was last scanned, so the
+        loop neither wakes late for a due source nor busy-loops while a jittered
+        source waits. Tripped sources are ignored: their (potentially long)
+        remaining cooldown must not stop the loop from waking for the healthy
+        sources.
         """
-        intervals = [self.interval]
+        now = self._clock() if now is None else now
+        waits = [float(self.interval)]
         for source in self.engine.store.list_sources(enabled_only=True):
             if self.engine.is_tripped(source):
                 continue
-            intervals.append(self.effective_interval(source))
-        return min(intervals)
+            last = self._last_scan.get(source.id)
+            if last is None:
+                waits.append(
+                    float(
+                        self.effective_interval(source) + self.jitter_offset(source)
+                    )
+                )
+            else:
+                waits.append(max(0.0, self.due_at(source, last) - now))
+        return min(waits)
 
     # -- lifecycle --------------------------------------------------------- #
     def start(self, run_immediately: bool = True) -> None:
