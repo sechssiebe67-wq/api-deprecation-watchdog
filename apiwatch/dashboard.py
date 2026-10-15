@@ -188,6 +188,8 @@ def render_dashboard(
         )
     )
 
+    export_link = '<a href="%s">%s</a>' % (_esc("/api/export"), _esc("Download JSON"))
+
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -200,6 +202,7 @@ def render_dashboard(
 <header>
   <h1>API Deprecation Watchdog</h1>
   <div class="muted">%s</div>
+  <div style="margin-top:.5rem">%s</div>
 </header>
 <main>
   <div class="cards">%s</div>
@@ -218,13 +221,14 @@ def render_dashboard(
     <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Interval</th><th>Min severity</th><th>Channels</th><th class="col-hide">Webhook</th><th class="col-hide">Auth</th><th>Health</th><th>Status</th><th>History</th></tr></thead>
     <tbody>%s</tbody>
   </table>
-  <p class="muted">JSON API: <code>/api/sources</code>, <code>/api/sources/:id/entries</code>, <code>/api/sources/:id/reset</code> (POST), <code>/api/alerts</code>, <code>/api/entries</code>, <code>/api/digests</code>, <code>/api/stats</code>, <code>/api/check</code> (POST), <code>/api/digest/flush</code> (POST).</p>
+  <p class="muted">JSON API: <code>/api/sources</code>, <code>/api/sources/:id/entries</code>, <code>/api/sources/:id/reset</code> (POST), <code>/api/alerts</code>, <code>/api/entries</code>, <code>/api/digests</code>, <code>/api/stats</code>, <code>/api/export</code>, <code>/api/check</code> (POST), <code>/api/digest/flush</code> (POST).</p>
 </main>
 </body>
 </html>
 """ % (
         _CSS,
         last_line,
+        export_link,
         card_html,
         alert_rows,
         digest_rows,

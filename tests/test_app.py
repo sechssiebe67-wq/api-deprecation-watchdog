@@ -8,7 +8,7 @@ from apiwatch.app import create_server, validate_source_payload
 from apiwatch.config import Config
 from apiwatch.engine import Engine
 from apiwatch.fetcher import FakeFetcher
-from apiwatch.models import Entry
+from apiwatch.models import Alert, Digest, Entry
 from apiwatch.store import Store
 
 FEED_URL = "https://example.com/feed"
@@ -662,6 +662,72 @@ class OpenAppTests(AppTestCase):
         self.assertIn("webhook", json.loads(body)["error"])
 
 
+class ExportTests(AppTestCase):
+    def _seed(self, sources=2, entries=3, alerts=3, digests=3):
+        for index in range(sources):
+            self.request(
+                "POST",
+                "/api/sources",
+                {"name": "Source %d" % index, "url": FEED_URL, "kind": "rss"},
+            )
+        for index in range(entries):
+            self.store.save_entry(
+                Entry(source_id=1, title="entry %d" % index, body="", fingerprint="e%d" % index)
+            )
+        for index in range(alerts):
+            self.store.create_alert(
+                Alert(source_id=1, entry_id=index + 1, severity="warning", reason="deprecated")
+            )
+        for index in range(digests):
+            self.store.create_digest(Digest(alert_count=1, severity="warning", subject="s"))
+
+    def test_export_returns_all_keys(self):
+        status, body = self.request("GET", "/api/export")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        for key in ("generated_at", "stats", "sources", "entries", "alerts", "digests"):
+            self.assertIn(key, payload)
+        self.assertIsInstance(payload["sources"], list)
+        self.assertIsInstance(payload["stats"], dict)
+        self.assertIn("sources", payload["stats"])
+
+    def test_export_limit_caps_collections_but_not_sources(self):
+        self._seed(sources=2, entries=3, alerts=3, digests=3)
+        status, body = self.request("GET", "/api/export?limit=1")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(len(payload["sources"]), 2)
+        self.assertEqual(len(payload["entries"]), 1)
+        self.assertEqual(len(payload["alerts"]), 1)
+        self.assertEqual(len(payload["digests"]), 1)
+
+    def test_export_default_limit_returns_everything_seeded(self):
+        self._seed(sources=1, entries=3, alerts=3, digests=3)
+        status, body = self.request("GET", "/api/export")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(len(payload["entries"]), 3)
+        self.assertEqual(len(payload["alerts"]), 3)
+        self.assertEqual(len(payload["digests"]), 3)
+
+    def test_export_rejects_non_integer_limit(self):
+        status, body = self.request("GET", "/api/export?limit=abc")
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)["error"], "invalid limit")
+
+    def test_export_rejects_out_of_range_limit(self):
+        for limit in ("0", "-1", "10001"):
+            status, body = self.request("GET", "/api/export?limit=%s" % limit)
+            self.assertEqual(status, 400)
+            self.assertEqual(json.loads(body)["error"], "invalid limit")
+
+    def test_dashboard_has_export_link(self):
+        status, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn('href="/api/export"', body)
+        self.assertIn("Download JSON", body)
+
+
 class SecuredAppTests(AppTestCase):
     token = "secret-token"
 
@@ -698,6 +764,16 @@ class SecuredAppTests(AppTestCase):
     def test_digests_read_stays_open(self):
         status, _ = self.request("GET", "/api/digests")
         self.assertEqual(status, 200)
+
+    def test_export_stays_open_without_token(self):
+        status, body = self.request("GET", "/api/export")
+        self.assertEqual(status, 200)
+        self.assertIn("sources", json.loads(body))
+
+    def test_export_stays_open_with_token(self):
+        status, body = self.request("GET", "/api/export", token="secret-token")
+        self.assertEqual(status, 200)
+        self.assertIn("sources", json.loads(body))
 
 
 if __name__ == "__main__":
