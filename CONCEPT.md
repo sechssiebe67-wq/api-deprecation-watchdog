@@ -27,7 +27,8 @@ heterogeneous noise into a single prioritized alert stream.
 ## Value proposition
 
 - Deprecation-focused detection instead of generic uptime/API monitoring.
-- Rule-based extraction from heterogeneous sources (RSS, HTML, JSON).
+- Rule-based extraction from heterogeneous sources (RSS, HTML, JSON,
+  statuspage.io), with per-source selectors for precision.
 - Relevance filtering against the API versions a team actually uses, so the
   signal stays small.
 - Delivery into existing developer workflows; no agent installation required.
@@ -35,10 +36,16 @@ heterogeneous noise into a single prioritized alert stream.
 ## Current capabilities (MVP increment)
 
 - **Source registry:** add, list and remove monitored sources with a kind
-  (`rss`, `html`, `json`), an API name and the tracked versions.
+  (`rss`, `html`, `json`, `statuspage`), an API name, the tracked versions and an
+  optional per-source selector.
 - **Parsers:** built-in parsers for RSS/Atom XML, JSON changelogs (several
-  common shapes) and HTML changelogs (headings + following content), all
+  common shapes), HTML changelogs (headings + following content) and
+  statuspage.io JSON (`incidents` + `scheduled_maintenances`), all
   dependency-free.
+- **Per-source selectors:** `html` sources accept a CSS-like simple selector
+  (tag, `#id`, `.class`, e.g. `h2.deprecation` or `#changelog`) and `json`
+  sources accept a dotted path (e.g. `data.releases`), so noisy pages yield the
+  right blocks without code changes.
 - **Relevance engine:** detects deprecation / breaking-change language
   (`deprecated`, `sunset`, `end of life`, `removed`, `breaking`, …) and boosts
   entries that mention a tracked version. Classifies each hit as
@@ -67,11 +74,40 @@ heterogeneous noise into a single prioritized alert stream.
 | POST   | `/api/check`      | Run a scan now (token protected)          |
 | GET    | `/api/stats`      | Aggregate counters                        |
 
+## Selector syntax
+
+The optional `selector` field on a source narrows extraction without any code
+change. It means different things per kind:
+
+- **`html`** – a CSS-like simple selector: an optional tag name, an optional
+  `#id`, and an optional `.class` (or combination). A block matches when the
+  block itself or one of its ancestors satisfies the selector, so `#id` scopes
+  extraction to a container. When the selector contains no tag/`#id`/`.class`
+  token it keeps the legacy behaviour of filtering blocks by text substring.
+  - `h2.deprecation` → only `<h2 class="deprecation">` blocks.
+  - `#changelog` → only the blocks nested inside `id="changelog"`.
+- **`json`** – a dotted path into the document.
+  - `data.releases` → walk `data` then `releases` before collecting entries.
+
+Example source registrations:
+
+```sh
+# HTML changelog: only grab release headings marked as deprecations.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Stripe","url":"https://docs.stripe.com/changelog","kind":"html",
+       "api_name":"Stripe","selector":"h2.deprecation","tracked_versions":["2024-01-01"]}'
+
+# JSON changelog: only read the releases array.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Acme","url":"https://api.acme.com/changelog.json","kind":"json",
+       "api_name":"Acme","selector":"data.releases","tracked_versions":["v2"]}'
+```
+
 ## Next direction
 
-1. **More source adapters:** GitHub releases, OpenAPI diff detection and
-   statuspage.io JSON, plus per-source selectors to make HTML extraction more
-   precise.
+1. **More source adapters:** GitHub releases and OpenAPI diff detection.
 2. **Smarter relevance:** semantic matching of version ranges (semver / date
    versions) and per-team severity rules.
 3. **Integrations:** GitHub/GitLab issues and Jira as delivery targets, plus
@@ -99,7 +135,7 @@ fetcher and no network access.
 
 - Depends on the structure and availability of external changelog sources;
   parsing is heuristic and can degrade when a source changes layout.
-- Source formats vary widely, which is why per-source kinds and future selectors
+- Source formats vary widely, which is why per-source kinds and selectors
   exist.
 - Teams may ignore deprecation warnings; prioritization and low noise are the
   mitigation.

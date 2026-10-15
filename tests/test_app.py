@@ -17,6 +17,22 @@ RSS = """<?xml version="1.0"?>
 </channel></rss>
 """
 
+STATUS_URL = "https://status.example.com/api/v2/incidents.json"
+STATUSPAGE = json.dumps(
+    {
+        "incidents": [
+            {
+                "name": "v1 API deprecated",
+                "status": "resolved",
+                "impact": "major",
+                "created_at": "2024-01-01T00:00:00Z",
+                "shortlink": "https://stspg.io/xyz",
+                "incident_updates": [{"body": "The v1 API is deprecated in favor of v2."}],
+            }
+        ]
+    }
+)
+
 
 class AppTestCase(unittest.TestCase):
     token = None
@@ -86,6 +102,34 @@ class OpenAppTests(AppTestCase):
     def test_invalid_source_rejected(self):
         status, body = self.request("POST", "/api/sources", {"name": "x", "url": "ftp://x", "kind": "rss"})
         self.assertEqual(status, 400)
+
+    def test_unknown_kind_rejected(self):
+        status, _ = self.request(
+            "POST", "/api/sources", {"name": "x", "url": FEED_URL, "kind": "sitemap"}
+        )
+        self.assertEqual(status, 400)
+
+    def test_statuspage_source_and_check(self):
+        self.fetcher.responses[STATUS_URL] = STATUSPAGE
+        status, body = self.request(
+            "POST",
+            "/api/sources",
+            {
+                "name": "Example Status",
+                "url": STATUS_URL,
+                "kind": "statuspage",
+                "tracked_versions": ["v1"],
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(body)["kind"], "statuspage")
+
+        status, body = self.request("POST", "/api/check")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["alerts_created"], 1)
+        self.assertEqual(payload["alerts"][0]["severity"], "warning")
+        self.assertIn("v1", payload["alerts"][0]["version_hits"])
 
     def test_delete_source(self):
         _, body = self.request(
