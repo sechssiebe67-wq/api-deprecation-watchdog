@@ -4,9 +4,10 @@ Deliberately dependency-free: a single escaped HTML document with inline CSS so
 the service works even without a template engine or asset pipeline.
 """
 import html
-from typing import List
+from datetime import datetime
+from typing import List, Optional
 
-from .models import Alert, Digest, Source
+from .models import Alert, Digest, Source, parse_iso8601, utcnow
 
 _CSS = """
 :root { color-scheme: light dark; }
@@ -57,8 +58,10 @@ def render_dashboard(
     alerts: List[Alert],
     digests: List[Digest] = None,
     default_interval: int = None,
+    now: Optional[datetime] = None,
 ) -> str:
     digests = digests or []
+    now = now or utcnow()
     cards = [
         ("sources", stats.get("sources", 0)),
         ("enabled", stats.get("sources_enabled", 0)),
@@ -90,12 +93,35 @@ def render_dashboard(
             parts.append("%d hdr" % len(source.headers))
         return " ".join(parts)
 
+    def _health_cell(source: Source) -> str:
+        """Render the breaker health without ever exposing headers/credentials."""
+        if source.breaker_until:
+            try:
+                until = parse_iso8601(source.breaker_until)
+            except ValueError:
+                until = None
+            if until is not None and until > now:
+                label = "tripped until %s" % until.strftime("%Y-%m-%d %H:%M UTC")
+                return (
+                    '<span class="critical">%s</span> '
+                    '<form method="post" action="/api/sources/%s/reset" '
+                    'style="display:inline"><button type="submit">Reset</button>'
+                    "</form>" % (_esc(label), _esc(source.id))
+                )
+        if source.failure_count:
+            noun = "failure" if source.failure_count == 1 else "failures"
+            return '<span class="warning">%s %s</span>' % (
+                _esc(source.failure_count),
+                noun,
+            )
+        return '<span class="info">ok</span>'
+
     if sources:
         source_rows = "".join(
             "<tr><td>%s</td><td><code>%s</code></td><td class=\"col-hide\">%s</td>"
             "<td class=\"col-hide\">%s</td><td>%s</td><td>%s</td><td>%s</td>"
             "<td class=\"col-hide muted\">%s</td><td class=\"col-hide\">%s</td>"
-            "<td>%s</td>"
+            "<td>%s</td><td>%s</td>"
             "<td><a href=\"/api/sources/%s/entries\">History</a></td></tr>"
             % (
                 _esc(source.name),
@@ -107,13 +133,14 @@ def render_dashboard(
                 _esc(", ".join(source.notify_channels)),
                 _esc(_truncate(source.notify_webhook_url) if source.notify_webhook_url else "\u2013"),
                 _esc(_auth_indicator(source)),
+                _health_cell(source),
                 _esc("enabled" if source.enabled else "disabled"),
                 _esc(source.id),
             )
             for source in sources
         )
     else:
-        source_rows = '<tr><td colspan="11" class="muted">No sources registered yet.</td></tr>'
+        source_rows = '<tr><td colspan="12" class="muted">No sources registered yet.</td></tr>'
 
     if alerts:
         alert_rows = ""
@@ -188,10 +215,10 @@ def render_dashboard(
   </table>
   <h2>Monitored sources</h2>
   <table>
-    <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Interval</th><th>Min severity</th><th>Channels</th><th class="col-hide">Webhook</th><th class="col-hide">Auth</th><th>Status</th><th>History</th></tr></thead>
+    <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Interval</th><th>Min severity</th><th>Channels</th><th class="col-hide">Webhook</th><th class="col-hide">Auth</th><th>Health</th><th>Status</th><th>History</th></tr></thead>
     <tbody>%s</tbody>
   </table>
-  <p class="muted">JSON API: <code>/api/sources</code>, <code>/api/sources/:id/entries</code>, <code>/api/alerts</code>, <code>/api/entries</code>, <code>/api/digests</code>, <code>/api/stats</code>, <code>/api/check</code> (POST), <code>/api/digest/flush</code> (POST).</p>
+  <p class="muted">JSON API: <code>/api/sources</code>, <code>/api/sources/:id/entries</code>, <code>/api/sources/:id/reset</code> (POST), <code>/api/alerts</code>, <code>/api/entries</code>, <code>/api/digests</code>, <code>/api/stats</code>, <code>/api/check</code> (POST), <code>/api/digest/flush</code> (POST).</p>
 </main>
 </body>
 </html>

@@ -3,12 +3,34 @@
 Plain dataclasses so the core logic stays dependency-free and easy to test.
 """
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 SOURCE_KINDS = ("rss", "html", "json", "statuspage", "github", "gitlab", "openapi")
 SEVERITIES = ("critical", "warning", "info")
 NOTIFY_CHANNELS = ("console", "slack", "email", "webhook")
 ALL_CHANNELS = "all"
+
+
+def parse_iso8601(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp into a timezone-aware UTC ``datetime``.
+
+    Accepts the ``+00:00`` form written by the store as well as a trailing
+    ``Z`` (which ``datetime.fromisoformat`` rejects before Python 3.11). Naive
+    values are assumed to be UTC.
+    """
+    text = value.strip()
+    if text.endswith("Z") or text.endswith("z"):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def utcnow() -> datetime:
+    """Return the current time as a timezone-aware UTC ``datetime``."""
+    return datetime.now(timezone.utc)
 
 
 def canonical_header_name(name: str) -> str:
@@ -37,6 +59,8 @@ class Source:
     auth: Optional[str] = None
     id: Optional[int] = None
     created_at: Optional[str] = None
+    failure_count: int = 0
+    breaker_until: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.min_severity not in SEVERITIES:
@@ -80,6 +104,22 @@ class Source:
             user, password = self.auth.split(":", 1)
             if not user or not password:
                 raise ValueError("auth must have a non-empty user and password")
+        # ``bool`` is an ``int`` subclass but is not a meaningful count.
+        if (
+            isinstance(self.failure_count, bool)
+            or not isinstance(self.failure_count, int)
+            or self.failure_count < 0
+        ):
+            raise ValueError("failure_count must be a non-negative integer")
+        if self.breaker_until is not None:
+            if not isinstance(self.breaker_until, str):
+                raise ValueError("breaker_until must be an ISO-8601 string or None")
+            try:
+                parse_iso8601(self.breaker_until)
+            except ValueError:
+                raise ValueError(
+                    "breaker_until must be a parseable ISO-8601 string or None"
+                )
 
     @staticmethod
     def _validate_headers(headers) -> Dict[str, str]:
@@ -118,6 +158,8 @@ class Source:
             "scan_interval_seconds": self.scan_interval_seconds,
             "headers": dict(self.headers),
             "auth": self.auth,
+            "failure_count": self.failure_count,
+            "breaker_until": self.breaker_until,
             "created_at": self.created_at,
         }
 

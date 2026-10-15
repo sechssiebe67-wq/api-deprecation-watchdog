@@ -5,12 +5,20 @@ relevance filter and fans new alerts out to the configured notifiers.
 """
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from datetime import datetime, timedelta, timezone
+from typing import Callable, Dict, List, Optional, Sequence
 
 from . import digest as digest_builder
 from . import parsers
 from .fetcher import FetchError, Fetcher
-from .models import ALL_CHANNELS, Alert, Digest, Entry, Source
+from .models import (
+    ALL_CHANNELS,
+    Alert,
+    Digest,
+    Entry,
+    Source,
+    parse_iso8601,
+)
 from .notify import NotificationError, Notifier, format_alert
 from .relevance import analyze, meets_floor
 from .store import Store
@@ -22,6 +30,7 @@ log = logging.getLogger("apiwatch.engine")
 class ScanResult:
     sources_checked: int = 0
     sources_failed: int = 0
+    sources_skipped: int = 0
     entries_seen: int = 0
     entries_new: int = 0
     alerts_created: int = 0
@@ -32,6 +41,7 @@ class ScanResult:
         return {
             "sources_checked": self.sources_checked,
             "sources_failed": self.sources_failed,
+            "sources_skipped": self.sources_skipped,
             "entries_seen": self.entries_seen,
             "entries_new": self.entries_new,
             "alerts_created": self.alerts_created,
@@ -48,6 +58,9 @@ class Engine:
         require_version: bool = False,
         digest_mode: str = "off",
         digest_max_alerts: int = 50,
+        breaker_threshold: int = 5,
+        breaker_cooldown_seconds: int = 1800,
+        clock: Optional[Callable[[], datetime]] = None,
     ) -> None:
         self.store = store
         self.fetcher = fetcher
@@ -55,11 +68,58 @@ class Engine:
         self.require_version = require_version
         self.digest_mode = digest_mode if digest_mode in ("off", "digest", "both") else "off"
         self.digest_max_alerts = max(1, int(digest_max_alerts))
+        self.breaker_threshold = max(1, int(breaker_threshold))
+        self.breaker_cooldown_seconds = max(1, int(breaker_cooldown_seconds))
+        self._clock = clock
+
+    # -- circuit breaker --------------------------------------------------- #
+    def now(self) -> datetime:
+        value = self._clock() if self._clock is not None else datetime.now(timezone.utc)
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def is_tripped(self, source: Source) -> bool:
+        """Return whether ``source`` is currently quarantined by its breaker."""
+        if not source.breaker_until:
+            return False
+        try:
+            until = parse_iso8601(source.breaker_until)
+        except ValueError:
+            return False
+        return until > self.now()
+
+    def _register_failure(self, source: Source) -> bool:
+        """Record a failed scan, returning ``True`` when this trip the breaker."""
+        failures = source.failure_count + 1
+        tripped = False
+        breaker_until = source.breaker_until
+        if failures >= self.breaker_threshold:
+            breaker_until = (
+                self.now() + timedelta(seconds=self.breaker_cooldown_seconds)
+            ).isoformat(timespec="seconds")
+            tripped = True
+        self.store.record_source_failure(source.id, failures, breaker_until)
+        source.failure_count = failures
+        source.breaker_until = breaker_until
+        return tripped
+
+    def _register_success(self, source: Source) -> None:
+        if not source.failure_count and not source.breaker_until:
+            return
+        self.store.record_source_success(source.id)
+        source.failure_count = 0
+        source.breaker_until = None
 
     def scan_source(self, source: Source, notify: bool = True) -> ScanResult:
         result = ScanResult()
         if source.id is None:
             result.errors.append("source has no id")
+            return result
+        if self.is_tripped(source):
+            # Quarantined: report it as skipped rather than failed so a manual
+            # check still covers every healthy source without hammering this one.
+            result.sources_skipped += 1
             return result
         try:
             body = self.fetcher.fetch(
@@ -67,6 +127,11 @@ class Engine:
             )
         except FetchError as exc:
             result.sources_failed += 1
+            if self._register_failure(source):
+                result.errors.append(
+                    "%s: circuit breaker tripped until %s"
+                    % (source.name, source.breaker_until)
+                )
             result.errors.append("%s: %s" % (source.name, exc))
             return result
 
@@ -80,7 +145,14 @@ class Engine:
         ):
             # Distinguish malformed input from a legitimate no-op diff: record an
             # error but keep scanning the other sources.
+            if self._register_failure(source):
+                result.errors.append(
+                    "%s: circuit breaker tripped until %s"
+                    % (source.name, source.breaker_until)
+                )
             result.errors.append("%s: malformed OpenAPI input" % source.name)
+        else:
+            self._register_success(source)
 
         versions = source.tracked_versions or []
         new_alerts: List[Alert] = []
@@ -138,6 +210,7 @@ class Engine:
             sub = self.scan_source(source, notify=notify)
             result.sources_checked += sub.sources_checked
             result.sources_failed += sub.sources_failed
+            result.sources_skipped += sub.sources_skipped
             result.entries_seen += sub.entries_seen
             result.entries_new += sub.entries_new
             result.alerts_created += sub.alerts_created

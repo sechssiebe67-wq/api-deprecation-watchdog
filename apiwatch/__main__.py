@@ -58,6 +58,8 @@ def build_app(config: Config = None):
         notifiers,
         digest_mode=config.digest_mode,
         digest_max_alerts=config.digest_max_alerts,
+        breaker_threshold=config.breaker_threshold,
+        breaker_cooldown_seconds=config.breaker_cooldown_seconds,
     )
     server = create_server(store, engine, config)
     return config, store, engine, server

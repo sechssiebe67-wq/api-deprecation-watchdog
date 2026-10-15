@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS sources (
     scan_interval_seconds INTEGER,
     headers TEXT,
     auth TEXT,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    breaker_until TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -131,6 +133,17 @@ class Store:
         if "auth" not in source_columns:
             # Old rows keep ``NULL`` which is read back as ``None``.
             self._conn.execute("ALTER TABLE sources ADD COLUMN auth TEXT")
+        if "failure_count" not in source_columns:
+            # Old rows default to ``0`` consecutive failures.
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN failure_count "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+        if "breaker_until" not in source_columns:
+            # Old rows keep ``NULL`` so they are not quarantined.
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN breaker_until TEXT"
+            )
 
         alert_columns = {
             row["name"]
@@ -163,8 +176,9 @@ class Store:
                 """INSERT INTO sources
                    (name, url, kind, api_name, tracked_versions, enabled, selector,
                     min_severity, notify_channels, notify_webhook_url,
-                    scan_interval_seconds, headers, auth, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    scan_interval_seconds, headers, auth, failure_count,
+                    breaker_until, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -179,6 +193,8 @@ class Store:
                     source.scan_interval_seconds,
                     json.dumps(source.headers or {}),
                     source.auth,
+                    source.failure_count,
+                    source.breaker_until,
                     _now(),
                 ),
             )
@@ -208,6 +224,27 @@ class Store:
             self._conn.execute("DELETE FROM alerts WHERE source_id = ?", (source_id,))
             self._conn.commit()
         return cur.rowcount > 0
+
+    def record_source_failure(
+        self, source_id: int, failure_count: int, breaker_until: Optional[str]
+    ) -> None:
+        """Persist a failed scan's consecutive-failure count and breaker window."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sources SET failure_count = ?, breaker_until = ? WHERE id = ?",
+                (failure_count, breaker_until, source_id),
+            )
+            self._conn.commit()
+
+    def record_source_success(self, source_id: int) -> None:
+        """Clear a source's failure count and breaker after a successful scan."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sources SET failure_count = 0, breaker_until = NULL "
+                "WHERE id = ?",
+                (source_id,),
+            )
+            self._conn.commit()
 
     # -- entries ----------------------------------------------------------- #
     def save_entry(self, entry: Entry) -> Optional[Entry]:
@@ -433,6 +470,13 @@ class Store:
             enabled = self._conn.execute(
                 "SELECT COUNT(*) FROM sources WHERE enabled = 1"
             ).fetchone()[0]
+            # ISO-8601 UTC strings with the same format compare lexicographically,
+            # so a string ``>`` correctly selects breakers that have not expired.
+            tripped = self._conn.execute(
+                "SELECT COUNT(*) FROM sources "
+                "WHERE breaker_until IS NOT NULL AND breaker_until > ?",
+                (_now(),),
+            ).fetchone()[0]
             entries = self._conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
             alerts = self._conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
             critical = self._conn.execute(
@@ -451,6 +495,7 @@ class Store:
         return {
             "sources": sources,
             "sources_enabled": enabled,
+            "sources_tripped": tripped,
             "entries": entries,
             "alerts": alerts,
             "alerts_critical": critical,
@@ -481,6 +526,8 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         headers=json.loads(row["headers"] or "{}"),
         auth=row["auth"],
         created_at=row["created_at"],
+        failure_count=int(row["failure_count"] or 0),
+        breaker_until=row["breaker_until"],
     )
 
 

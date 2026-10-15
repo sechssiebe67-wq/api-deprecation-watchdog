@@ -60,6 +60,10 @@ spec:
               value: {{ .Values.config.digestIntervalSeconds | quote }}
             - name: DIGEST_MAX_ALERTS
               value: {{ .Values.config.digestMaxAlerts | quote }}
+            - name: BREAKER_THRESHOLD
+              value: {{ .Values.config.breakerThreshold | quote }}
+            - name: BREAKER_COOLDOWN_SECONDS
+              value: {{ .Values.config.breakerCooldownSeconds | quote }}
             {{- if .Values.existingSecret }}
             - name: API_TOKEN
               valueFrom:
