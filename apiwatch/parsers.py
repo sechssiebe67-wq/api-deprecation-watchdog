@@ -2,9 +2,15 @@
 
 Supported kinds:
 
-* ``rss``  – RSS 2.0 and Atom XML feeds.
-* ``json`` – JSON changelogs in several common shapes.
-* ``html`` – HTML changelogs built from headings / list items.
+* ``rss``        – RSS 2.0 and Atom XML feeds.
+* ``json``       – JSON changelogs in several common shapes.
+* ``html``       – HTML changelogs built from headings / list items.
+* ``statuspage`` – statuspage.io JSON (``incidents`` / ``scheduled_maintenances``).
+
+HTML and JSON sources accept an optional ``selector`` to narrow extraction:
+for ``html`` the selector is a CSS-like simple selector (tag name, ``#id``,
+``.class`` or a combination such as ``h2.deprecation``); for ``json`` it is a
+dotted path such as ``data.releases``.
 
 All parsers return a list of :class:`ParsedEntry` objects and never raise on
 malformed input; they degrade to an empty list instead. Pure functions keep the
@@ -244,34 +250,160 @@ def _apply_selector(data, selector: str):
 
 
 # --------------------------------------------------------------------------- #
+# statuspage.io
+# --------------------------------------------------------------------------- #
+def parse_statuspage(text: str, base_url: str = "", selector: Optional[str] = None) -> List[ParsedEntry]:
+    """Parse a statuspage.io JSON document.
+
+    Reads the ``incidents`` and ``scheduled_maintenances`` arrays and maps each
+    element to a :class:`ParsedEntry`. Malformed input (including non-JSON) is
+    tolerated and yields an empty list rather than raising.
+    """
+    if not text or not text.strip():
+        return []
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return []
+    try:
+        if selector:
+            data = _apply_selector(data, selector)
+        if not isinstance(data, dict):
+            return []
+        entries: List[ParsedEntry] = []
+        for key in ("incidents", "scheduled_maintenances"):
+            items = data.get(key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                entry = _statuspage_entry(item, base_url)
+                if entry.title or entry.body:
+                    entries.append(entry)
+        return entries
+    except Exception:  # defensive: malformed payloads must never crash a scan
+        return []
+
+
+def _statuspage_entry(item: dict, base_url: str) -> ParsedEntry:
+    title = _first(item, ("name", "title"))
+    published = _first(item, ("created_at", "updated_at"))
+    link = _first(item, ("shortlink", "url"))
+    body = ""
+    updates = item.get("incident_updates")
+    if isinstance(updates, list):
+        parts: List[str] = []
+        for update in updates:
+            if isinstance(update, dict):
+                part = _first(update, ("body", "text", "update"))
+            else:
+                part = _clean(str(update))
+            if part:
+                parts.append(part)
+        body = " ".join(parts)
+    if not body:
+        body = _first(item, ("body",))
+
+    categories: List[str] = []
+    for key in ("status", "impact"):
+        value = item.get(key)
+        if value not in (None, ""):
+            cleaned = _clean(str(value))
+            if cleaned:
+                categories.append(cleaned)
+
+    return ParsedEntry(
+        title=title or body[:120],
+        body=body,
+        link=urljoin(base_url, link) if link else "",
+        published=published,
+        categories=categories,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # HTML
 # --------------------------------------------------------------------------- #
-class _HtmlCollector(HTMLParser):
-    """Collects headings, paragraphs and list items in document order."""
+_HTML_BLOCK_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6", "p", "li"})
+_VOID_TAGS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
+# Simple CSS selector: optional tag, optional #id, optional one or more .class
+_CSS_SELECTOR_RE = re.compile(
+    r"^(?P<tag>[a-zA-Z][a-zA-Z0-9]*)?(?P<id>#[\w-]+)?(?P<classes>(?:\.[\w-]+)*)$"
+)
 
-    _BLOCK_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "li"}
+
+class _HtmlCollector(HTMLParser):
+    """Collects headings, paragraphs and list items in document order.
+
+    Each collected block remembers the chain of open elements (its ``path``) so
+    a selector can scope by ancestor id/class as well as by the block's own tag
+    and attributes.
+    """
+
+    _BLOCK_TAGS = _HTML_BLOCK_TAGS
 
     def __init__(self) -> None:
         HTMLParser.__init__(self, convert_charrefs=True)
-        self.blocks: List[Dict[str, str]] = []
+        self.blocks: List[Dict[str, object]] = []
+        self.links: List[str] = []
+        self._stack: List[Dict[str, object]] = []
         self._tag: Optional[str] = None
         self._buf: List[str] = []
-        self._current_link: Optional[str] = None
-        self.links: List[str] = []
+        self._path: List[Dict[str, object]] = []
+
+    def _element(self, tag: str, attrs) -> Dict[str, object]:
+        element: Dict[str, object] = {"tag": tag, "id": "", "classes": set()}
+        for key, value in attrs:
+            if key == "id" and value:
+                element["id"] = value
+            elif key == "class" and value:
+                element["classes"] = set(value.split())
+        return element
 
     def handle_starttag(self, tag: str, attrs) -> None:
+        element = self._element(tag, attrs)
+        if tag not in _VOID_TAGS:
+            self._stack.append(element)
         if tag in self._BLOCK_TAGS:
             self._flush()
             self._tag = tag
+            self._path = list(self._stack)
         elif tag == "a":
             for key, value in attrs:
                 if key == "href" and value:
-                    self._current_link = value
+                    self.links.append(value)
+
+    def handle_startendtag(self, tag: str, attrs) -> None:
+        if tag == "a":
+            for key, value in attrs:
+                if key == "href" and value:
                     self.links.append(value)
 
     def handle_endtag(self, tag: str) -> None:
         if tag in self._BLOCK_TAGS:
             self._flush()
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index]["tag"] == tag:
+                del self._stack[index:]
+                break
 
     def handle_data(self, data: str) -> None:
         if self._tag and data.strip():
@@ -281,15 +413,59 @@ class _HtmlCollector(HTMLParser):
         if self._tag and self._buf:
             text = _clean(" ".join(self._buf))
             if text:
-                self.blocks.append({"tag": self._tag, "text": text})
+                self.blocks.append({"tag": self._tag, "text": text, "path": list(self._path)})
         self._tag = None
         self._buf = []
+        self._path = []
 
     def close(self) -> None:
         try:
             HTMLParser.close(self)
         finally:
             self._flush()
+
+
+def _parse_css_selector(selector: str):
+    match = _CSS_SELECTOR_RE.match(selector.strip())
+    if not match:
+        return None
+    tag = (match.group("tag") or "").lower()
+    id_token = match.group("id")
+    id_name = id_token[1:] if id_token else ""
+    classes = [part for part in (match.group("classes") or "").split(".") if part]
+    if not (tag or id_name or classes):
+        return None
+    return tag, id_name, classes
+
+
+def _is_html_selector(selector: str) -> bool:
+    """True when the selector is structural (tag/#id/.class) rather than text."""
+    stripped = selector.strip()
+    if not stripped:
+        return False
+    if "#" in stripped or "." in stripped:
+        return True
+    return stripped.lower() in _HTML_BLOCK_TAGS
+
+
+def _element_matches(element: Dict[str, object], tag: str, id_name: str, classes) -> bool:
+    if tag and element.get("tag") != tag:
+        return False
+    if id_name and element.get("id") != id_name:
+        return False
+    element_classes = element.get("classes") or set()
+    for cls in classes:
+        if cls not in element_classes:
+            return False
+    return True
+
+
+def _block_matches(block: Dict[str, object], parsed) -> bool:
+    tag, id_name, classes = parsed
+    return any(
+        _element_matches(element, tag, id_name, classes)
+        for element in block.get("path", [])  # type: ignore[union-attr]
+    )
 
 
 def parse_html(text: str, base_url: str = "", selector: Optional[str] = None) -> List[ParsedEntry]:
@@ -304,7 +480,11 @@ def parse_html(text: str, base_url: str = "", selector: Optional[str] = None) ->
 
     blocks = collector.blocks
     if selector:
-        blocks = [b for b in blocks if selector.lower() in b["text"].lower()]
+        parsed = _parse_css_selector(selector) if _is_html_selector(selector) else None
+        if parsed is not None:
+            blocks = [block for block in blocks if _block_matches(block, parsed)]
+        else:
+            blocks = [block for block in blocks if selector.lower() in block["text"].lower()]
 
     entries: List[ParsedEntry] = []
     current: Optional[ParsedEntry] = None
@@ -337,4 +517,6 @@ def parse(kind: str, text: str, base_url: str = "", selector: Optional[str] = No
         return parse_json(text, base_url, selector)
     if kind == "html":
         return parse_html(text, base_url, selector)
+    if kind == "statuspage":
+        return parse_statuspage(text, base_url, selector)
     return []

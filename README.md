@@ -18,8 +18,12 @@ actually use.
 
 ## Features
 
-- **Source registry** for RSS/Atom, JSON and HTML changelogs.
-- **Parsers** for all three formats, with no third-party dependencies.
+- **Source registry** for RSS/Atom, JSON, HTML and statuspage.io (`rss`,
+  `json`, `html`, `statuspage`).
+- **Parsers** for all four formats, with no third-party dependencies.
+- **Per-source selectors** for precise extraction: a CSS-like selector for
+  `html` (`h2.deprecation`, `#changelog`) and a dotted path for `json`
+  (`data.releases`).
 - **Relevance engine** that detects deprecation / breaking-change language and
   boosts entries referencing tracked versions; classifies hits as `critical`,
   `warning` or `info`.
@@ -83,13 +87,36 @@ All configuration is environment based:
 | GET    | `/api/stats`       | Aggregate counters                        |
 | POST   | `/api/check`       | Run a scan now (token protected)          |
 
-Register a source:
+Register a source. The `POST /api/sources` payload accepts:
+
+| Field              | Required | Purpose                                                       |
+| ------------------ | -------- | ------------------------------------------------------------- |
+| `name`             | yes      | Display name                                                  |
+| `url`              | yes      | `http(s)` URL to fetch                                         |
+| `kind`             | yes      | `rss`, `json`, `html` or `statuspage`                         |
+| `api_name`         | no       | API/SDK the source documents                                  |
+| `tracked_versions` | no       | Versions to boost during relevance scoring                    |
+| `selector`         | no       | Extraction hint; CSS-like for `html`, dotted path for `json`  |
+| `enabled`          | no       | Whether the scheduler polls it (default `true`)               |
+
+For `html`, `selector` is a CSS-like simple selector (optional tag, `#id`,
+`.class`, or a combination). It matches a block when the block or an ancestor
+satisfies it, so `#changelog` scopes extraction to that container. For `json`,
+`selector` is a dotted path such as `data.releases`.
 
 ```sh
+# HTML changelog, narrowed to deprecation headings.
 curl -X POST http://localhost:8080/api/sources \
   -H 'Content-Type: application/json' \
   -d '{"name":"Stripe","url":"https://docs.stripe.com/changelog",
-       "kind":"html","api_name":"Stripe","tracked_versions":["2024-01-01"]}'
+       "kind":"html","api_name":"Stripe","selector":"h2.deprecation",
+       "tracked_versions":["2024-01-01"]}'
+
+# statuspage.io status feed.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Acme Status","url":"https://status.acme.com/api/v2/incidents.json",
+       "kind":"statuspage","api_name":"Acme","tracked_versions":["v1"]}'
 ```
 
 ## Deployment
