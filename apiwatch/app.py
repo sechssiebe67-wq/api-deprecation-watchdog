@@ -6,6 +6,7 @@ dependency-free. Mutating endpoints are protected by an optional bearer token.
 import hmac
 import json
 import logging
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
@@ -20,12 +21,37 @@ log = logging.getLogger("apiwatch.app")
 
 MAX_BODY_BYTES = 64 * 1024
 
+_GITHUB_HTML_RE = re.compile(
+    r"^https?://(?:www\.)?github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"
+)
+_GITHUB_API_RE = re.compile(
+    r"^https?://api\.github\.com/repos/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:/releases)?/?$"
+)
+
 
 class ApiError(Exception):
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+def normalize_github_url(url: str) -> str:
+    """Normalize a GitHub repository URL to its releases REST API URL.
+
+    Accepts ``https://github.com/<owner>/<repo>`` (with or without a trailing
+    ``.git``) as well as an ``api.github.com/repos/<owner>/<repo>`` URL and
+    returns ``https://api.github.com/repos/<owner>/<repo>/releases``. Anything
+    that does not look like a GitHub repository URL is returned unchanged.
+    """
+    for pattern in (_GITHUB_HTML_RE, _GITHUB_API_RE):
+        match = pattern.match(url.strip())
+        if match:
+            return "https://api.github.com/repos/%s/%s/releases" % (
+                match.group("owner"),
+                match.group("repo"),
+            )
+    return url
 
 
 def validate_source_payload(payload: dict) -> Source:
@@ -40,6 +66,8 @@ def validate_source_payload(payload: dict) -> Source:
         raise ApiError(400, "'url' must be an http(s) URL")
     if kind not in SOURCE_KINDS:
         raise ApiError(400, "'kind' must be one of %s" % ", ".join(SOURCE_KINDS))
+    if kind == "github":
+        url = normalize_github_url(url)
     versions = payload.get("tracked_versions") or []
     if not isinstance(versions, list) or not all(isinstance(v, str) for v in versions):
         raise ApiError(400, "'tracked_versions' must be a list of strings")

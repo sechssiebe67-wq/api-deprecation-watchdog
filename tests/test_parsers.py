@@ -153,6 +153,97 @@ class StatuspageParserTests(unittest.TestCase):
         self.assertEqual(parsers.parse_statuspage("   "), [])
 
 
+GITHUB_RELEASES = json.dumps(
+    [
+        {
+            "name": "v2.0.0",
+            "tag_name": "v2.0.0",
+            "body": "This release contains a breaking change in the auth API.",
+            "html_url": "https://github.com/acme/widget/releases/tag/v2.0.0",
+            "published_at": "2024-05-01T00:00:00Z",
+            "prerelease": False,
+            "draft": False,
+        },
+        {
+            "name": "v1.9.0",
+            "tag_name": "v1.9.0",
+            "body": "Minor bug fixes.",
+            "html_url": "https://github.com/acme/widget/releases/tag/v1.9.0",
+            "published_at": "2024-04-01T00:00:00Z",
+            "prerelease": False,
+            "draft": False,
+        },
+    ]
+)
+
+
+class GithubParserTests(unittest.TestCase):
+    def test_parses_two_releases(self):
+        entries = parsers.parse_github(
+            GITHUB_RELEASES, base_url="https://api.github.com/repos/acme/widget/releases"
+        )
+        self.assertEqual(len(entries), 2)
+        first = entries[0]
+        self.assertEqual(first.title, "v2.0.0")
+        self.assertIn("breaking change", first.body)
+        self.assertEqual(first.link, "https://github.com/acme/widget/releases/tag/v2.0.0")
+        self.assertEqual(first.published, "2024-05-01T00:00:00Z")
+        self.assertIn("v2.0.0", first.categories)
+        self.assertNotIn("prerelease", first.categories)
+
+    def test_title_falls_back_to_tag_name_when_name_missing(self):
+        text = json.dumps([{"tag_name": "v1.2.3", "body": "notes"}])
+        entries = parsers.parse_github(text)
+        self.assertEqual(entries[0].title, "v1.2.3")
+
+    def test_drafts_are_skipped(self):
+        text = json.dumps(
+            [
+                {"tag_name": "v3.0.0", "body": "still cooking", "draft": True},
+                {"tag_name": "v2.5.0", "body": "shipped"},
+            ]
+        )
+        entries = parsers.parse_github(text)
+        self.assertEqual([e.title for e in entries], ["v2.5.0"])
+
+    def test_prerelease_kept_and_categorized(self):
+        text = json.dumps(
+            [
+                {
+                    "name": "v3.0.0-rc1",
+                    "tag_name": "v3.0.0-rc1",
+                    "body": "release candidate",
+                    "prerelease": True,
+                }
+            ]
+        )
+        entries = parsers.parse_github(text)
+        self.assertEqual(len(entries), 1)
+        self.assertIn("v3.0.0-rc1", entries[0].categories)
+        self.assertIn("prerelease", entries[0].categories)
+
+    def test_dotted_selector(self):
+        text = json.dumps(
+            {
+                "data": {"releases": [{"tag_name": "v1.0.0"}]},
+                "other": [{"tag_name": "nope"}],
+            }
+        )
+        entries = parsers.parse_github(text, selector="data.releases")
+        self.assertEqual([e.title for e in entries], ["v1.0.0"])
+
+    def test_malformed_returns_empty(self):
+        self.assertEqual(parsers.parse_github("not json"), [])
+        self.assertEqual(parsers.parse_github(""), [])
+        self.assertEqual(parsers.parse_github("   "), [])
+        self.assertEqual(parsers.parse_github('{"not": "a list"}'), [])
+        self.assertEqual(parsers.parse("github", "not json"), [])
+
+    def test_dispatch(self):
+        entries = parsers.parse("github", GITHUB_RELEASES)
+        self.assertEqual(len(entries), 2)
+
+
 class HtmlParserTests(unittest.TestCase):
     def test_headings_become_entries(self):
         markup = """
