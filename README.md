@@ -18,20 +18,23 @@ actually use.
 
 ## Features
 
-- **Source registry** for RSS/Atom, JSON, HTML, statuspage.io, GitHub releases
-  and OpenAPI/Swagger specs (`rss`, `json`, `html`, `statuspage`, `github`,
-  `openapi`).
-- **Parsers** for all six formats, with no third-party dependencies. The
+- **Source registry** for RSS/Atom, JSON, HTML, statuspage.io, GitHub and
+  GitLab releases and OpenAPI/Swagger specs (`rss`, `json`, `html`,
+  `statuspage`, `github`, `gitlab`, `openapi`).
+- **Parsers** for all seven formats, with no third-party dependencies. The
   `github` kind accepts either `https://api.github.com/repos/<owner>/<repo>/releases`
   or the repository HTML URL `https://github.com/<owner>/<repo>`, which is
-  normalized to the API URL on registration.
+  normalized to the API URL on registration. The `gitlab` kind mirrors this:
+  it accepts the releases API URL
+  `https://gitlab.com/api/v4/projects/<id-or-path>/releases` or the project
+  HTML URL `https://gitlab.com/<group>/<project>`, normalized to the API URL.
 - **OpenAPI diff detection**: the `openapi` kind diffs two spec versions (from
   a selected list) and emits one entry per structural change — removed paths or
   operations, narrowed enums, added required parameters — with a severity
   derived from the kind of change rather than from changelog prose.
 - **Per-source selectors** for precise extraction: a CSS-like selector for
   `html` (`h2.deprecation`, `#changelog`) and a dotted path for `json`,
-  `github` and `openapi` (`data.releases`, `versions`).
+  `github`, `gitlab` and `openapi` (`data.releases`, `versions`).
 - **Relevance engine** that detects deprecation / breaking-change language and
   boosts entries referencing tracked versions; classifies hits as `critical`,
   `warning` or `info` (the severity ladder, highest to lowest).
@@ -116,10 +119,10 @@ Register a source. The `POST /api/sources` payload accepts:
 | ------------------ | -------- | ------------------------------------------------------------- |
 | `name`             | yes      | Display name                                                  |
 | `url`              | yes      | `http(s)` URL to fetch                                         |
-| `kind`             | yes      | `rss`, `json`, `html`, `statuspage`, `github` or `openapi`   |
+| `kind`             | yes      | `rss`, `json`, `html`, `statuspage`, `github`, `gitlab` or `openapi` |
 | `api_name`         | no       | API/SDK the source documents                                  |
 | `tracked_versions` | no       | Versions to boost during relevance scoring                    |
-| `selector`         | no       | Extraction hint; CSS-like for `html`, dotted path for `json`/`github`/`openapi` |
+| `selector`         | no       | Extraction hint; CSS-like for `html`, dotted path for `json`/`github`/`gitlab`/`openapi` |
 | `enabled`          | no       | Whether the scheduler polls it (default `true`)               |
 | `min_severity`     | no       | Lowest severity that creates an alert: `critical`, `warning` or `info` (default `info`) |
 | `notify_channels`  | no       | Channels that receive this source's alerts: a list of `console`, `slack`, `email` or `all` (default `all`) |
@@ -127,8 +130,8 @@ Register a source. The `POST /api/sources` payload accepts:
 For `html`, `selector` is a CSS-like simple selector (optional tag, `#id`,
 `.class`, or a combination). It matches a block when the block or an ancestor
 satisfies it, so `#changelog` scopes extraction to that container. For `json`,
-`github` and `openapi`, `selector` is a dotted path such as `data.releases` or
-`versions`.
+`github`, `gitlab` and `openapi`, `selector` is a dotted path such as
+`data.releases` or `versions`.
 
 For `github` sources, `url` may be either the releases REST API URL
 (`https://api.github.com/repos/<owner>/<repo>/releases`) or the repository HTML
@@ -138,6 +141,17 @@ release becomes an entry whose title is the release `name` or `tag_name`, body
 is the release `body`, link is `html_url`, date is `published_at`, and whose
 categories include the `tag_name` and, when set, `prerelease`; draft releases
 are skipped.
+
+For `gitlab` sources, `url` may be either the releases REST API URL
+(`https://gitlab.com/api/v4/projects/<id-or-path>/releases`) or the project
+HTML URL (`https://gitlab.com/<group>/<project>`, with or without a trailing
+`.git` or `/`; nested subgroups are supported). The HTML form is normalized to
+`https://gitlab.com/api/v4/projects/<group>%2F<project>/releases` when the
+source is stored, while an existing API URL is left unchanged. Each release
+becomes an entry whose title is the release `name` or `tag_name`, body is the
+release `description`, link is `_links.self`, date is `released_at`, and whose
+categories include the `tag_name` and, when set, `upcoming_release`. GitLab has
+no draft concept, so no release is skipped.
 
 For `openapi` sources, `url` points at an OpenAPI or Swagger JSON document.
 Without a `selector` the document itself is treated as a single spec; with a
@@ -203,6 +217,13 @@ curl -X POST http://localhost:8080/api/sources \
   -H 'Content-Type: application/json' \
   -d '{"name":"Widget SDK","url":"https://github.com/acme/widget","kind":"github",
        "api_name":"Widget","tracked_versions":["v2"],"min_severity":"warning"}'
+
+# GitLab releases: paste the project URL, it is normalized to the releases API.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Widget SDK (GitLab)","url":"https://gitlab.com/acme/widget",
+       "kind":"gitlab","api_name":"Widget","tracked_versions":["v2"],
+       "min_severity":"warning"}'
 
 # OpenAPI spec: diff the versions array and alert on warning+ structural changes.
 curl -X POST http://localhost:8080/api/sources \

@@ -7,13 +7,14 @@ Supported kinds:
 * ``html``       – HTML changelogs built from headings / list items.
 * ``statuspage`` – statuspage.io JSON (``incidents`` / ``scheduled_maintenances``).
 * ``github``     – GitHub releases JSON from the REST API (``/releases``).
+* ``gitlab``     – GitLab releases JSON from the REST API (``/releases``).
 * ``openapi``    – OpenAPI / Swagger specs, diffed between versions.
 
 HTML and JSON sources accept an optional ``selector`` to narrow extraction:
 for ``html`` the selector is a CSS-like simple selector (tag name, ``#id``,
 ``.class`` or a combination such as ``h2.deprecation``); for ``json``,
-``github`` and ``openapi`` it is a dotted path such as ``data.releases`` or
-``versions``.
+``github``, ``gitlab`` and ``openapi`` it is a dotted path such as
+``data.releases`` or ``versions``.
 
 All parsers return a list of :class:`ParsedEntry` objects and never raise on
 malformed input; they degrade to an empty list instead. Pure functions keep the
@@ -373,6 +374,64 @@ def parse_github(text: str, base_url: str = "", selector: Optional[str] = None) 
             categories.append("prerelease")
         if item.get("draft"):
             categories.append("draft")
+
+        if not (title or body):
+            continue
+        entries.append(
+            ParsedEntry(
+                title=title or body[:120],
+                body=body,
+                link=urljoin(base_url, link) if link else "",
+                published=published,
+                categories=categories,
+            )
+        )
+    return entries
+
+
+# --------------------------------------------------------------------------- #
+# GitLab releases
+# --------------------------------------------------------------------------- #
+def parse_gitlab(text: str, base_url: str = "", selector: Optional[str] = None) -> List[ParsedEntry]:
+    """Parse GitLab releases JSON (REST API ``/projects/:id/releases``).
+
+    Maps each release to a :class:`ParsedEntry`: title from ``name`` or
+    ``tag_name``, body from ``description``, link from ``_links.self``, date
+    from ``released_at`` and categories from ``tag_name`` and, when set,
+    ``upcoming_release``. GitLab has no draft concept, so no release is skipped.
+    Malformed input (including non-JSON) is tolerated and yields an empty list
+    rather than raising.
+    """
+    if not text or not text.strip():
+        return []
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return []
+
+    if selector:
+        data = _apply_selector(data, selector)
+    if not isinstance(data, list):
+        return []
+
+    entries: List[ParsedEntry] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        title = _first(item, ("name", "tag_name"))
+        body = _first(item, ("description",))
+        links = item.get("_links")
+        link = _first(links, ("self",)) if isinstance(links, dict) else ""
+        published = _first(item, ("released_at",))
+
+        categories: List[str] = []
+        tag = item.get("tag_name")
+        if tag not in (None, ""):
+            cleaned = _clean(str(tag))
+            if cleaned:
+                categories.append(cleaned)
+        if item.get("upcoming_release"):
+            categories.append("upcoming_release")
 
         if not (title or body):
             continue
@@ -1016,6 +1075,8 @@ def parse(kind: str, text: str, base_url: str = "", selector: Optional[str] = No
         return parse_statuspage(text, base_url, selector)
     if kind == "github":
         return parse_github(text, base_url, selector)
+    if kind == "gitlab":
+        return parse_gitlab(text, base_url, selector)
     if kind == "openapi":
         return parse_openapi(text, base_url, selector)
     return []

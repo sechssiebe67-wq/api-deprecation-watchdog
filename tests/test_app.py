@@ -36,6 +36,20 @@ STATUSPAGE = json.dumps(
 
 GITHUB_HTML_URL = "https://github.com/acme/widget"
 GITHUB_API_URL = "https://api.github.com/repos/acme/widget/releases"
+GITLAB_HTML_URL = "https://gitlab.com/acme/widget"
+GITLAB_API_URL = "https://gitlab.com/api/v4/projects/acme%2Fwidget/releases"
+GITLAB_RELEASES = json.dumps(
+    [
+        {
+            "name": "v2.0.0",
+            "tag_name": "v2.0.0",
+            "description": "The legacy /v1 endpoints are deprecated.",
+            "released_at": "2024-05-01T00:00:00.000Z",
+            "upcoming_release": False,
+            "_links": {"self": "https://gitlab.com/acme/widget/-/releases/v2.0.0"},
+        }
+    ]
+)
 GITHUB_RELEASES = json.dumps(
     [
         {
@@ -268,6 +282,56 @@ class OpenAppTests(AppTestCase):
 
         status, body = self.request("GET", "/api/entries")
         self.assertEqual(len(json.loads(body)["entries"]), 2)
+
+    def test_create_gitlab_source_normalizes_url(self):
+        status, body = self.request(
+            "POST",
+            "/api/sources",
+            {
+                "name": "Widget SDK (GitLab)",
+                "url": GITLAB_HTML_URL,
+                "kind": "gitlab",
+                "api_name": "Widget",
+                "tracked_versions": ["v2"],
+                "min_severity": "warning",
+            },
+        )
+        self.assertEqual(status, 201)
+        source = json.loads(body)
+        self.assertEqual(source["kind"], "gitlab")
+        self.assertEqual(source["url"], GITLAB_API_URL)
+
+        # An existing API URL is stored unchanged.
+        status, body = self.request(
+            "POST",
+            "/api/sources",
+            {"name": "Widget API (GitLab)", "url": GITLAB_API_URL, "kind": "gitlab"},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(body)["url"], GITLAB_API_URL)
+
+    def test_gitlab_source_scan_alerts_on_deprecation(self):
+        self.fetcher.responses[GITLAB_API_URL] = GITLAB_RELEASES
+        status, _ = self.request(
+            "POST",
+            "/api/sources",
+            {
+                "name": "Widget SDK (GitLab)",
+                "url": GITLAB_HTML_URL,
+                "kind": "gitlab",
+                "api_name": "Widget",
+                "tracked_versions": ["v1"],
+                "min_severity": "warning",
+            },
+        )
+        self.assertEqual(status, 201)
+
+        status, body = self.request("POST", "/api/check")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["entries_new"], 1)
+        self.assertEqual(payload["alerts_created"], 1)
+        self.assertEqual(payload["alerts"][0]["severity"], "warning")
 
     def test_create_openapi_source_accepts_selector_and_min_severity(self):
         url = "https://api.acme.com/openapi.json"
