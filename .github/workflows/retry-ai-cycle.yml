@@ -1,0 +1,36 @@
+name: AI Cycle Watchdog
+
+on:
+  workflow_run:
+    workflows: [AI PR Reviewer, Review Resolver]
+    types: [completed]
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: read
+
+concurrency:
+  group: ai-cycle-watchdog
+  cancel-in-progress: false
+
+jobs:
+  retry-stalled-reviews:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'failure' ||
+      github.event.workflow_run.conclusion == 'timed_out' ||
+      github.event.workflow_run.conclusion == 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Retry failed review or resolver for the current PR revision
+        env:
+          GH_TOKEN: ${{ secrets.TAMBINOS_PAT }}
+        run: python3 .github/scripts/retry_cycle.py
