@@ -274,6 +274,16 @@ class WatchdogHandler(BaseHTTPRequestHandler):
                     raise ApiError(404, "digest not found")
                 self._send_json(200, digest.to_dict())
                 return
+        if path.startswith("/api/sources/") and path.endswith("/entries"):
+            source_id = _parse_id(path[len("/api/sources/"): -len("/entries")].rstrip("/"))
+            if method != "GET":
+                raise ApiError(404, "not found")
+            if self.store.get_source(source_id) is None:
+                raise ApiError(404, "source not found")
+            limit = _int_param(query, "limit", 100)
+            entries = self.store.list_entries_for_source(source_id, limit)
+            self._send_json(200, {"entries": [e.to_dict() for e in entries]})
+            return
         if path.startswith("/api/sources/"):
             source_id = _parse_id(path.rsplit("/", 1)[-1])
             if method == "DELETE":
