@@ -109,6 +109,40 @@ class OpenAppTests(AppTestCase):
         )
         self.assertEqual(status, 400)
 
+    def test_create_source_with_min_severity(self):
+        status, body = self.request(
+            "POST",
+            "/api/sources",
+            {"name": "Example", "url": FEED_URL, "kind": "rss", "min_severity": "warning"},
+        )
+        self.assertEqual(status, 201)
+        source = json.loads(body)
+        self.assertEqual(source["min_severity"], "warning")
+
+        status, body = self.request("GET", "/api/sources/%d" % source["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["min_severity"], "warning")
+
+        status, body = self.request("GET", "/api/sources")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["sources"][0]["min_severity"], "warning")
+
+    def test_source_min_severity_defaults_to_info(self):
+        status, body = self.request(
+            "POST", "/api/sources", {"name": "Example", "url": FEED_URL, "kind": "rss"}
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(body)["min_severity"], "info")
+
+    def test_invalid_min_severity_rejected(self):
+        status, body = self.request(
+            "POST",
+            "/api/sources",
+            {"name": "Example", "url": FEED_URL, "kind": "rss", "min_severity": "fatal"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("min_severity", json.loads(body)["error"])
+
     def test_statuspage_source_and_check(self):
         self.fetcher.responses[STATUS_URL] = STATUSPAGE
         status, body = self.request(

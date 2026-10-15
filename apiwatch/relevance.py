@@ -132,6 +132,16 @@ def analyze(entry: ParsedEntry, versions: List[str] = None, require_version: boo
     )
 
 
+def severity_rank(severity: str) -> int:
+    """Rank a severity on the ``critical`` > ``warning`` > ``info`` ladder."""
+    return _SEVERITY_RANK.get(severity, 0)
+
+
+def meets_floor(severity: str, floor: str) -> bool:
+    """Return whether ``severity`` ranks at or above the ``floor``."""
+    return severity_rank(severity) >= severity_rank(floor)
+
+
 def max_severity(severities: List[str]) -> str:
     if not severities:
         return "info"

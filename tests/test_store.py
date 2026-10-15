@@ -14,8 +14,15 @@ class StoreTests(unittest.TestCase):
     def tearDown(self):
         self.store.close()
 
-    def _source(self, name="Example", url="https://example.com/feed"):
-        return Source(name=name, url=url, kind="rss", api_name="Example", tracked_versions=["v1"])
+    def _source(self, name="Example", url="https://example.com/feed", **kwargs):
+        return Source(
+            name=name,
+            url=url,
+            kind="rss",
+            api_name="Example",
+            tracked_versions=["v1"],
+            **kwargs,
+        )
 
     def test_add_and_list_sources(self):
         created = self.store.add_source(self._source())
@@ -86,6 +93,62 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(stats["last_check"]["alerts_created"], 2)
         self.assertEqual(stats["digests"], 0)
         self.assertEqual(stats["alerts_pending_digest"], 0)
+
+    def test_source_min_severity_defaults_to_info(self):
+        created = self.store.add_source(self._source())
+        self.assertEqual(created.min_severity, "info")
+        self.assertEqual(self.store.get_source(created.id).min_severity, "info")
+
+    def test_source_min_severity_round_trip(self):
+        created = self.store.add_source(self._source(min_severity="warning"))
+        self.assertEqual(created.min_severity, "warning")
+        self.assertEqual(created.to_dict()["min_severity"], "warning")
+        fetched = self.store.get_source(created.id)
+        self.assertEqual(fetched.min_severity, "warning")
+        self.assertEqual(self.store.list_sources()[0].min_severity, "warning")
+
+    def test_migrates_sources_table_without_min_severity(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = sqlite3.connect(path)
+            conn.executescript(
+                """
+                CREATE TABLE sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    api_name TEXT NOT NULL DEFAULT '',
+                    tracked_versions TEXT NOT NULL DEFAULT '[]',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    selector TEXT,
+                    created_at TEXT NOT NULL
+                );
+                INSERT INTO sources
+                    (name, url, kind, api_name, tracked_versions, enabled, selector, created_at)
+                VALUES ('Legacy', 'https://legacy.example/feed', 'rss', '', '[]', 1, NULL, '2024-01-01');
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            store = Store(path)
+            columns = {
+                row["name"]
+                for row in store._conn.execute("PRAGMA table_info(sources)").fetchall()
+            }
+            self.assertIn("min_severity", columns)
+            legacy = store.list_sources()[0]
+            self.assertEqual(legacy.name, "Legacy")
+            self.assertEqual(legacy.min_severity, "info")
+            fresh = store.add_source(
+                Source(name="New", url="https://new.example/feed", kind="rss", min_severity="critical")
+            )
+            self.assertEqual(fresh.min_severity, "critical")
+            store.close()
+        finally:
+            os.remove(path)
 
 
 class DigestStoreTests(unittest.TestCase):

@@ -18,8 +18,13 @@ class Source:
     tracked_versions: List[str] = field(default_factory=list)
     enabled: bool = True
     selector: Optional[str] = None
+    min_severity: str = "info"
     id: Optional[int] = None
     created_at: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.min_severity not in SEVERITIES:
+            raise ValueError("min_severity must be one of %s" % ", ".join(SEVERITIES))
 
     def to_dict(self) -> dict:
         return {
@@ -31,6 +36,7 @@ class Source:
             "tracked_versions": list(self.tracked_versions),
             "enabled": self.enabled,
             "selector": self.selector,
+            "min_severity": self.min_severity,
             "created_at": self.created_at,
         }
 
