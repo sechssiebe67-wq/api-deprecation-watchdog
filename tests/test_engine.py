@@ -15,6 +15,15 @@ RSS = """<?xml version="1.0"?>
 </channel></rss>
 """
 
+FLOOR_RSS = """<?xml version="1.0"?>
+<rss version="2.0"><channel>
+  <item><title>New release notice</title><description>A minor announcement.</description>
+    <link>https://example.com/info</link></item>
+  <item><title>v1 breaking change</title><description>v1 will be removed.</description>
+    <link>https://example.com/critical</link></item>
+</channel></rss>
+"""
+
 
 class CapturingNotifier(Notifier):
     name = "capture"
@@ -107,6 +116,38 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result.alerts_created, 1)
         self.assertEqual(len(result.errors), 1)
         self.assertIsNotNone(bad.id)
+
+    def test_min_severity_floor_suppresses_lower_alerts(self):
+        url = "https://example.com/floor"
+        source = self.store.add_source(
+            Source(name="Floored", url=url, kind="rss", min_severity="warning")
+        )
+        engine = Engine(self.store, FakeFetcher({url: FLOOR_RSS}))
+        result = engine.scan_source(source)
+        # Both entries are stored, but only the warning-severity-relevant
+        # critical one clears the source's floor.
+        self.assertEqual(result.entries_new, 2)
+        self.assertEqual(result.alerts_created, 1)
+        self.assertEqual([a.severity for a in result.alerts], ["critical"])
+        self.assertEqual(len(self.store.list_entries(source_id=source.id)), 2)
+        self.assertEqual(len(self.store.list_alerts()), 1)
+
+        # Re-scanning is still idempotent: the suppressed entry is not lost and
+        # does not turn into a duplicate alert later.
+        again = engine.scan_source(source)
+        self.assertEqual(again.entries_new, 0)
+        self.assertEqual(again.alerts_created, 0)
+        self.assertEqual(len(self.store.list_entries(source_id=source.id)), 2)
+        self.assertEqual(len(self.store.list_alerts()), 1)
+
+    def test_info_floor_still_alerts_on_info(self):
+        url = "https://example.com/info-floor"
+        source = self.store.add_source(
+            Source(name="Info floor", url=url, kind="rss", min_severity="info")
+        )
+        engine = Engine(self.store, FakeFetcher({url: FLOOR_RSS}))
+        result = engine.scan_source(source)
+        self.assertEqual(result.alerts_created, 2)
 
     def test_seed_default_sources_is_idempotent(self):
         from apiwatch.sources import default_sources

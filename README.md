@@ -26,7 +26,10 @@ actually use.
   (`data.releases`).
 - **Relevance engine** that detects deprecation / breaking-change language and
   boosts entries referencing tracked versions; classifies hits as `critical`,
-  `warning` or `info`.
+  `warning` or `info` (the severity ladder, highest to lowest).
+- **Per-source severity floor**: each source has a `min_severity` (default
+  `info`) that suppresses alerts below the chosen level while still recording
+  the entries.
 - **SQLite history** with content-hash de-duplication (no repeated alerts).
 - **Notifications** via Slack webhook, SMTP e-mail and console.
 - **Digest notifications** that batch alerts into a single grouped, severity-
@@ -106,11 +109,19 @@ Register a source. The `POST /api/sources` payload accepts:
 | `tracked_versions` | no       | Versions to boost during relevance scoring                    |
 | `selector`         | no       | Extraction hint; CSS-like for `html`, dotted path for `json`  |
 | `enabled`          | no       | Whether the scheduler polls it (default `true`)               |
+| `min_severity`     | no       | Lowest severity that creates an alert: `critical`, `warning` or `info` (default `info`) |
 
 For `html`, `selector` is a CSS-like simple selector (optional tag, `#id`,
 `.class`, or a combination). It matches a block when the block or an ancestor
 satisfies it, so `#changelog` scopes extraction to that container. For `json`,
 `selector` is a dotted path such as `data.releases`.
+
+`min_severity` controls the per-source alert floor. The relevance engine still
+classifies and stores every matched entry, but only entries whose severity ranks
+at or above the floor become alerts. The ladder is `critical` > `warning` >
+`info`, so a source with `min_severity: "warning"` ignores `info`-level release
+notes but still alerts on `warning` and `critical` deprecations. Entries below
+the floor remain in the history (`/api/entries`) and are de-duplicated normally.
 
 ```sh
 # HTML changelog, narrowed to deprecation headings.
@@ -119,6 +130,13 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Stripe","url":"https://docs.stripe.com/changelog",
        "kind":"html","api_name":"Stripe","selector":"h2.deprecation",
        "tracked_versions":["2024-01-01"]}'
+
+# A chatty source that only shows info noise: only alert on warning+.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Acme Changelog","url":"https://api.acme.com/changelog.json",
+       "kind":"json","api_name":"Acme","selector":"data.releases",
+       "tracked_versions":["v2"],"min_severity":"warning"}'
 
 # statuspage.io status feed.
 curl -X POST http://localhost:8080/api/sources \

@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS sources (
     tracked_versions TEXT NOT NULL DEFAULT '[]',
     enabled INTEGER NOT NULL DEFAULT 1,
     selector TEXT,
+    min_severity TEXT NOT NULL DEFAULT 'info',
     created_at TEXT NOT NULL
 );
 
@@ -96,6 +97,15 @@ class Store:
 
     def _migrate(self) -> None:
         """Idempotently evolve pre-existing databases to the current schema."""
+        source_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(sources)").fetchall()
+        }
+        if "min_severity" not in source_columns:
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN min_severity TEXT NOT NULL DEFAULT 'info'"
+            )
+
         alert_columns = {
             row["name"]
             for row in self._conn.execute("PRAGMA table_info(alerts)").fetchall()
@@ -125,8 +135,9 @@ class Store:
         with self._lock:
             cur = self._conn.execute(
                 """INSERT INTO sources
-                   (name, url, kind, api_name, tracked_versions, enabled, selector, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (name, url, kind, api_name, tracked_versions, enabled, selector,
+                    min_severity, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -135,6 +146,7 @@ class Store:
                     json.dumps(source.tracked_versions),
                     1 if source.enabled else 0,
                     source.selector,
+                    source.min_severity,
                     _now(),
                 ),
             )
@@ -413,6 +425,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         tracked_versions=json.loads(row["tracked_versions"] or "[]"),
         enabled=bool(row["enabled"]),
         selector=row["selector"],
+        min_severity=row["min_severity"],
         created_at=row["created_at"],
     )
 

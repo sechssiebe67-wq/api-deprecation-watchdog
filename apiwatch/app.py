@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 from .config import Config
 from .dashboard import render_dashboard
 from .engine import Engine
-from .models import SOURCE_KINDS, Source
+from .models import SEVERITIES, SOURCE_KINDS, Source
 from .store import Store
 
 log = logging.getLogger("apiwatch.app")
@@ -46,6 +46,13 @@ def validate_source_payload(payload: dict) -> Source:
     selector = payload.get("selector")
     if selector is not None and not isinstance(selector, str):
         raise ApiError(400, "'selector' must be a string")
+    min_severity = payload.get("min_severity", "info")
+    if min_severity is None:
+        min_severity = "info"
+    if not isinstance(min_severity, str) or min_severity.strip().lower() not in SEVERITIES:
+        raise ApiError(
+            400, "'min_severity' must be one of %s" % ", ".join(SEVERITIES)
+        )
     return Source(
         name=name,
         url=url,
@@ -54,6 +61,7 @@ def validate_source_payload(payload: dict) -> Source:
         tracked_versions=versions,
         enabled=bool(payload.get("enabled", True)),
         selector=selector,
+        min_severity=min_severity.strip().lower(),
     )
 
 

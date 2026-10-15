@@ -49,7 +49,16 @@ heterogeneous noise into a single prioritized alert stream.
 - **Relevance engine:** detects deprecation / breaking-change language
   (`deprecated`, `sunset`, `end of life`, `removed`, `breaking`, …) and boosts
   entries that mention a tracked version. Classifies each hit as
-  `critical`, `warning` or `info`.
+  `critical`, `warning` or `info`, a ladder where `critical` ranks highest and
+  `info` lowest.
+- **Per-source severity floor:** every source carries a `min_severity`
+  (`critical`, `warning` or `info`, default `info`). The engine classifies and
+  stores every matched entry regardless, but only creates an alert when the
+  entry's severity ranks at or above the source's floor. This lets operators
+  mute a chatty source that only ever emits `info`-level release notes while a
+  source documenting a critical dependency keeps surfacing everything. Entries
+  below the floor are still persisted, so history, `/api/entries` and
+  content-hash de-duplication are unaffected.
 - **Persistence:** SQLite store with de-duplication by content hash, so the same
   announcement is only alerted once.
 - **Notifications:** Slack incoming webhook, SMTP e-mail and a console channel;
@@ -84,8 +93,8 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources                    |
-| POST   | `/api/sources`    | Register a source (token protected)       |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity` (token protected) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
 | GET    | `/api/alerts`     | List alerts, newest first                 |
 | GET    | `/api/entries`    | List parsed changelog entries             |
@@ -110,6 +119,10 @@ change. It means different things per kind:
 - **`json`** – a dotted path into the document.
   - `data.releases` → walk `data` then `releases` before collecting entries.
 
+Every source also accepts an optional `min_severity` (`critical`, `warning` or
+`info`, default `info`). An entry is only turned into an alert when its severity
+ranks at or above this floor; lower-severity entries are still parsed and stored.
+
 Example source registrations:
 
 ```sh
@@ -119,11 +132,12 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Stripe","url":"https://docs.stripe.com/changelog","kind":"html",
        "api_name":"Stripe","selector":"h2.deprecation","tracked_versions":["2024-01-01"]}'
 
-# JSON changelog: only read the releases array.
+# JSON changelog: only read the releases array, and skip info-level noise.
 curl -X POST http://localhost:8080/api/sources \
   -H 'Content-Type: application/json' \
   -d '{"name":"Acme","url":"https://api.acme.com/changelog.json","kind":"json",
-       "api_name":"Acme","selector":"data.releases","tracked_versions":["v2"]}'
+       "api_name":"Acme","selector":"data.releases","tracked_versions":["v2"],
+       "min_severity":"warning"}'
 ```
 
 ## Next direction
@@ -132,9 +146,13 @@ curl -X POST http://localhost:8080/api/sources \
 severity-ordered summaries delivered on a configurable cadence in addition to
 immediate alerts.
 
+*Shipped:* **per-source severity floor** (see *Current capabilities*) — a
+`min_severity` on each source that suppresses alerts below the chosen severity
+while still recording the underlying entries.
+
 1. **More source adapters:** GitHub releases and OpenAPI diff detection.
 2. **Smarter relevance:** semantic matching of version ranges (semver / date
-   versions) and per-team severity rules.
+   versions), per-team severity rules and richer keyword tuning.
 3. **Integrations:** GitHub/GitLab issues and Jira as delivery targets.
 4. **Multi-tenant onboarding:** organizations, API keys and shared source
    templates for the manual concierge phase.

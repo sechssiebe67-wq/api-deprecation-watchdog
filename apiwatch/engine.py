@@ -12,7 +12,7 @@ from . import parsers
 from .fetcher import FetchError, Fetcher
 from .models import Alert, Digest, Entry, Source
 from .notify import NotificationError, Notifier, format_alert
-from .relevance import analyze
+from .relevance import analyze, meets_floor
 from .store import Store
 
 log = logging.getLogger("apiwatch.engine")
@@ -90,6 +90,9 @@ class Engine:
             result.entries_new += 1
             verdict = analyze(item, versions, require_version=self.require_version)
             if not verdict.relevant:
+                continue
+            if not meets_floor(verdict.severity, source.min_severity):
+                # Below the source's floor: keep the entry, skip the alert.
                 continue
             alert = self.store.create_alert(
                 Alert(
