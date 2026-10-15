@@ -1,0 +1,153 @@
+"""The scanning engine.
+
+Fetches each enabled source, parses it, de-duplicates entries, applies the
+relevance filter and fans new alerts out to the configured notifiers.
+"""
+import logging
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence
+
+from . import parsers
+from .fetcher import FetchError, Fetcher
+from .models import Alert, Entry, Source
+from .notify import NotificationError, Notifier, format_alert
+from .relevance import analyze
+from .store import Store
+
+log = logging.getLogger("apiwatch.engine")
+
+
+@dataclass
+class ScanResult:
+    sources_checked: int = 0
+    sources_failed: int = 0
+    entries_seen: int = 0
+    entries_new: int = 0
+    alerts_created: int = 0
+    alerts: List[Alert] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "sources_checked": self.sources_checked,
+            "sources_failed": self.sources_failed,
+            "entries_seen": self.entries_seen,
+            "entries_new": self.entries_new,
+            "alerts_created": self.alerts_created,
+            "errors": list(self.errors),
+        }
+
+
+class Engine:
+    def __init__(
+        self,
+        store: Store,
+        fetcher: Fetcher,
+        notifiers: Optional[Sequence[Notifier]] = None,
+        require_version: bool = False,
+    ) -> None:
+        self.store = store
+        self.fetcher = fetcher
+        self.notifiers = list(notifiers or [])
+        self.require_version = require_version
+
+    def scan_source(self, source: Source, notify: bool = True) -> ScanResult:
+        result = ScanResult()
+        if source.id is None:
+            result.errors.append("source has no id")
+            return result
+        try:
+            body = self.fetcher.fetch(source.url)
+        except FetchError as exc:
+            result.sources_failed += 1
+            result.errors.append("%s: %s" % (source.name, exc))
+            return result
+
+        parsed = parsers.parse(source.kind, body, base_url=source.url, selector=source.selector)
+        result.sources_checked = 1
+        result.entries_seen = len(parsed)
+
+        versions = source.tracked_versions or []
+        new_alerts: List[Alert] = []
+        for item in parsed:
+            digest = parsers.fingerprint(item.title, item.body, item.published)
+            entry = Entry(
+                source_id=source.id,
+                title=item.title[:500],
+                body=item.body[:20000],
+                link=item.link,
+                published=item.published,
+                fingerprint=digest,
+            )
+            stored = self.store.save_entry(entry)
+            if stored is None:
+                continue  # already known
+            result.entries_new += 1
+            verdict = analyze(item, versions, require_version=self.require_version)
+            if not verdict.relevant:
+                continue
+            alert = self.store.create_alert(
+                Alert(
+                    source_id=source.id,
+                    entry_id=stored.id,
+                    severity=verdict.severity,
+                    reason=verdict.reason,
+                    matched_terms=verdict.matched_terms,
+                    version_hits=verdict.version_hits,
+                    title=stored.title,
+                    link=stored.link,
+                )
+            )
+            if alert is not None:
+                new_alerts.append(alert)
+
+        result.alerts_created = len(new_alerts)
+        result.alerts = new_alerts
+        if notify and new_alerts:
+            self.dispatch(new_alerts)
+        return result
+
+    def scan_all(self, notify: bool = True) -> ScanResult:
+        result = ScanResult()
+        sources = self.store.list_sources(enabled_only=True)
+        for source in sources:
+            sub = self.scan_source(source, notify=notify)
+            result.sources_checked += sub.sources_checked
+            result.sources_failed += sub.sources_failed
+            result.entries_seen += sub.entries_seen
+            result.entries_new += sub.entries_new
+            result.alerts_created += sub.alerts_created
+            result.alerts.extend(sub.alerts)
+            result.errors.extend(sub.errors)
+            if sub.errors:
+                log.warning("scan errors for %s: %s", source.name, sub.errors)
+        return result
+
+    def dispatch(self, alerts: List[Alert]) -> None:
+        if not alerts or not self.notifiers:
+            return
+        names: Dict[int, str] = {
+            source.id: source.name for source in self.store.list_sources() if source.id is not None
+        }
+        delivered = False
+        for notifier in self.notifiers:
+            try:
+                notifier.send(alerts, names)
+                delivered = True
+            except NotificationError as exc:
+                log.warning("notifier %s failed: %s", notifier.name, exc)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning("notifier %s crashed: %s", notifier.name, exc)
+        if delivered:
+            self.store.mark_notified([alert.id for alert in alerts if alert.id is not None])
+
+    def preview(self, alerts: Sequence[Alert]) -> List[str]:
+        names = {source.id: source.name for source in self.store.list_sources()}
+        return [format_alert(a, names.get(a.source_id, "")) for a in alerts]
+
+
+def seed_default_sources(store: Store, sources: Sequence[Source]) -> None:
+    existing = {(source.name, source.url) for source in store.list_sources()}
+    for source in sources:
+        if (source.name, source.url) not in existing:
+            store.add_source(source)

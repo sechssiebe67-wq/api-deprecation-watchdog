@@ -1,0 +1,110 @@
+# Default values for api-deprecation-watchdog.
+
+replicaCount: 1
+
+image:
+  # The factory release tooling sets repository and digest so the workload
+  # renders <repository>@<digest> for an immutable, verifiable image.
+  repository: ghcr.io/example/api-deprecation-watchdog
+  digest: ""
+  # tag is only used when no digest is provided.
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: api-deprecation-watchdog.example.com
+  path: /
+  pathType: Prefix
+  tls: []
+  # - secretName: api-deprecation-watchdog-tls
+  #   hosts:
+  #     - api-deprecation-watchdog.example.com
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+persistence:
+  enabled: true
+  # Empty uses the cluster default StorageClass.
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+  mountPath: /data
+
+# Application configuration. See CONCEPT.md for the full list.
+config:
+  pollIntervalSeconds: 3600
+  fetchTimeoutSeconds: 20
+  disableScheduler: false
+  seedSources: true
+  logLevel: INFO
+
+# Optional plain-text environment values.
+extraEnv: []
+#  - name: SMTP_TO
+#    value: ops@example.com
+
+# Optional existing Secret holding API_TOKEN, SLACK_WEBHOOK_URL and SMTP_* keys.
+existingSecret: ""
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

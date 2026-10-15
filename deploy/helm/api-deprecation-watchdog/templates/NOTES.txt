@@ -1,0 +1,15 @@
+API Deprecation Watchdog has been deployed.
+
+1. Check the rollout:
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "api-deprecation-watchdog.fullname" . }}
+
+2. Reach the dashboard:
+{{- if .Values.ingress.enabled }}
+   http://{{ .Values.ingress.host }}{{ .Values.ingress.path }}
+{{- else }}
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "api-deprecation-watchdog.fullname" . }} 8080:{{ .Values.service.port }}
+   then open http://localhost:8080
+{{- end }}
+
+3. Configure notifications by creating a Secret and setting `existingSecret`
+   with the keys API_TOKEN, SLACK_WEBHOOK_URL and SMTP_*.
