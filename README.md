@@ -144,7 +144,9 @@ at most `DIGEST_MAX_ALERTS` alerts and states how many were omitted.
 
 Flushes happen on their own timer (`DIGEST_INTERVAL_SECONDS`, default daily) and
 can be triggered on demand. A notifier failure is logged and leaves the digest
-undelivered without aborting the request or the scheduler.
+undelivered without aborting the request or the scheduler; because alerts are
+only claimed by a digest once it has been delivered, a failed flush keeps them
+pending so the next flush retries them.
 
 ```sh
 # Deliver a digest now; returns the created digest, or {"digest": null}.

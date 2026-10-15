@@ -70,7 +70,8 @@ heterogeneous noise into a single prioritized alert stream.
   Flushes run on their own timer (`DIGEST_INTERVAL_SECONDS`, minimum `300`,
   default daily) or on demand via `POST /api/digest/flush`; a notifier failure
   is logged and leaves the digest undelivered without aborting the request or
-  the scheduler.
+  the scheduler. Alerts are only claimed by a digest after successful delivery,
+  so a failed flush leaves them pending and the next flush retries them.
 - **Web dashboard:** an accessible overview of sources, recent alerts, recent
   digests, pending-digest alerts and scan statistics, plus a JSON API.
 - **Operations:** HTTP server on port `8080`, `GET /healthz`, background polling

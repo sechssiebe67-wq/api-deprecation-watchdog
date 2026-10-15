@@ -190,6 +190,36 @@ class DigestEngineTests(unittest.TestCase):
         self.assertIsNotNone(digest)
         self.assertFalse(digest.delivered)
         self.assertFalse(self.store.get_digest(digest.id).delivered)
+        # A failed flush must not consume the alerts: they stay pending so the
+        # next flush can retry them.
+        self.assertEqual(self.store.stats()["alerts_pending_digest"], 1)
+        self.assertEqual(len(self.store.list_undigested_alerts()), 1)
+        self.assertEqual(len(self.store.list_alerts(notified=False)), 1)
+
+    def test_failed_flush_is_retried_on_next_flush(self):
+        failing = FailingDigestNotifier()
+        engine = self._engine(failing, "digest")
+        engine.scan_source(self.source)
+        self.assertFalse(engine.flush_digest().delivered)
+
+        capture = DigestCapturingNotifier()
+        engine.notifiers = [capture]
+        retry = engine.flush_digest()
+        self.assertIsNotNone(retry)
+        self.assertTrue(retry.delivered)
+        self.assertEqual(len(capture.digests), 1)
+        self.assertEqual(self.store.stats()["alerts_pending_digest"], 0)
+        self.assertEqual(len(self.store.list_alerts(notified=False)), 0)
+
+    def test_digest_subject_and_omitted_round_trip(self):
+        notifier = DigestCapturingNotifier()
+        engine = self._engine(notifier, "digest")
+        engine.scan_source(self.source)
+        digest = engine.flush_digest()
+        self.assertEqual(digest.subject, "API Deprecation Watchdog digest: 1 alert")
+        self.assertEqual(digest.omitted, 0)
+        self.assertEqual(notifier.digests[0].subject, digest.subject)
+        self.assertEqual(self.store.get_digest(digest.id).subject, digest.subject)
 
 
 if __name__ == "__main__":

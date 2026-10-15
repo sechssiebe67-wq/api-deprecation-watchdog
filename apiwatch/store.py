@@ -60,7 +60,9 @@ CREATE TABLE IF NOT EXISTS digests (
     alert_count INTEGER NOT NULL DEFAULT 0,
     severity TEXT NOT NULL DEFAULT 'info',
     delivered INTEGER NOT NULL DEFAULT 0,
-    body TEXT NOT NULL DEFAULT ''
+    body TEXT NOT NULL DEFAULT '',
+    subject TEXT NOT NULL DEFAULT '',
+    omitted INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS check_runs (
@@ -94,12 +96,25 @@ class Store:
 
     def _migrate(self) -> None:
         """Idempotently evolve pre-existing databases to the current schema."""
-        columns = {
+        alert_columns = {
             row["name"]
             for row in self._conn.execute("PRAGMA table_info(alerts)").fetchall()
         }
-        if "digest_id" not in columns:
+        if "digest_id" not in alert_columns:
             self._conn.execute("ALTER TABLE alerts ADD COLUMN digest_id INTEGER")
+
+        digest_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(digests)").fetchall()
+        }
+        if "subject" not in digest_columns:
+            self._conn.execute(
+                "ALTER TABLE digests ADD COLUMN subject TEXT NOT NULL DEFAULT ''"
+            )
+        if "omitted" not in digest_columns:
+            self._conn.execute(
+                "ALTER TABLE digests ADD COLUMN omitted INTEGER NOT NULL DEFAULT 0"
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -263,31 +278,42 @@ class Store:
             self._conn.commit()
 
     # -- digests ----------------------------------------------------------- #
-    def create_digest(
-        self, digest: Digest, alert_ids: Optional[List[int]] = None
-    ) -> Digest:
-        members = alert_ids if alert_ids is not None else list(digest.alert_ids)
+    def create_digest(self, digest: Digest) -> Digest:
+        """Persist a digest row.
+
+        Member alerts are *not* attached here: only a successfully delivered
+        digest claims its alerts (see :meth:`attach_alerts_to_digest`), so a
+        failed flush leaves the alerts pending for the next attempt.
+        """
         with self._lock:
             cur = self._conn.execute(
                 """INSERT INTO digests
-                   (created_at, alert_count, severity, delivered, body)
-                   VALUES (?, ?, ?, ?, ?)""",
+                   (created_at, alert_count, severity, delivered, body, subject, omitted)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
                     digest.created_at or _now(),
                     digest.alert_count,
                     digest.severity,
                     1 if digest.delivered else 0,
                     digest.body,
+                    digest.subject,
+                    digest.omitted,
                 ),
             )
             digest_id = cur.lastrowid
-            if members:
-                self._conn.executemany(
-                    "UPDATE alerts SET digest_id = ? WHERE id = ?",
-                    [(digest_id, alert_id) for alert_id in members],
-                )
             self._conn.commit()
         return self.get_digest(digest_id)
+
+    def attach_alerts_to_digest(self, digest_id: int, alert_ids: List[int]) -> None:
+        """Mark ``alert_ids`` as consumed by an already delivered digest."""
+        if not alert_ids:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE alerts SET digest_id = ? WHERE id = ?",
+                [(digest_id, alert_id) for alert_id in alert_ids],
+            )
+            self._conn.commit()
 
     def get_digest(self, digest_id: int) -> Optional[Digest]:
         with self._lock:
@@ -429,4 +455,6 @@ def _row_to_digest(row: sqlite3.Row) -> Digest:
         severity=row["severity"],
         delivered=bool(row["delivered"]),
         body=row["body"],
+        subject=row["subject"],
+        omitted=row["omitted"],
     )

@@ -176,6 +176,8 @@ class OpenAppTests(AppTestCase):
         digest = json.loads(body)["digest"]
         self.assertIsNotNone(digest)
         self.assertEqual(digest["alert_count"], 1)
+        self.assertEqual(digest["subject"], "API Deprecation Watchdog digest: 1 alert")
+        self.assertEqual(digest["omitted"], 0)
         self.assertTrue(digest["delivered"])
 
         status, body = self.request("GET", "/api/digests")

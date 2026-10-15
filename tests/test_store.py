@@ -107,14 +107,21 @@ class DigestStoreTests(unittest.TestCase):
         )
 
     def test_digest_round_trip(self):
-        alert = self._alert()
         digest = self.store.create_digest(
-            Digest(alert_count=1, severity="warning", body="hello", delivered=False),
-            alert_ids=[alert.id],
+            Digest(
+                alert_count=1,
+                severity="warning",
+                body="hello",
+                subject="API Deprecation Watchdog digest: 1 alert",
+                omitted=4,
+                delivered=False,
+            )
         )
         self.assertIsNotNone(digest.id)
         fetched = self.store.get_digest(digest.id)
         self.assertEqual(fetched.body, "hello")
+        self.assertEqual(fetched.subject, "API Deprecation Watchdog digest: 1 alert")
+        self.assertEqual(fetched.omitted, 4)
         self.assertFalse(fetched.delivered)
         self.assertEqual([d.id for d in self.store.list_digests()], [digest.id])
         self.store.mark_digest_delivered(digest.id)
@@ -127,16 +134,56 @@ class DigestStoreTests(unittest.TestCase):
         undigested = self.store.list_undigested_alerts()
         self.assertEqual([a.id for a in undigested], [pending.id])
 
-        digest = self.store.create_digest(
-            Digest(alert_count=1, severity="warning", body="x"), alert_ids=[pending.id]
-        )
+        digest = self.store.create_digest(Digest(alert_count=1, severity="warning", body="x"))
         self.assertIsNotNone(digest.id)
+        # Creating a digest does not consume alerts on its own.
+        self.assertEqual([a.id for a in self.store.list_undigested_alerts()], [pending.id])
+        self.assertEqual(self.store.stats()["alerts_pending_digest"], 1)
+
+        self.store.attach_alerts_to_digest(digest.id, [pending.id])
         self.assertEqual(self.store.list_undigested_alerts(), [])
         self.assertEqual(self.store.stats()["alerts_pending_digest"], 0)
 
     def test_pending_digest_counter(self):
         self._alert()
         self.assertEqual(self.store.stats()["alerts_pending_digest"], 1)
+
+    def test_migrates_digests_table_without_subject_and_omitted(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = sqlite3.connect(path)
+            conn.executescript(
+                """
+                CREATE TABLE digests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    alert_count INTEGER NOT NULL DEFAULT 0,
+                    severity TEXT NOT NULL DEFAULT 'info',
+                    delivered INTEGER NOT NULL DEFAULT 0,
+                    body TEXT NOT NULL DEFAULT ''
+                );
+                INSERT INTO digests (created_at, alert_count, severity, delivered, body)
+                VALUES ('2024-01-01', 1, 'info', 0, 'legacy');
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            store = Store(path)
+            columns = {
+                row["name"]
+                for row in store._conn.execute("PRAGMA table_info(digests)").fetchall()
+            }
+            self.assertIn("subject", columns)
+            self.assertIn("omitted", columns)
+            legacy = store.list_digests()[0]
+            self.assertEqual(legacy.body, "legacy")
+            self.assertEqual(legacy.subject, "")
+            self.assertEqual(legacy.omitted, 0)
+            store.close()
+        finally:
+            os.remove(path)
 
     def test_migrates_database_without_digest_id(self):
         fd, path = tempfile.mkstemp(suffix=".db")

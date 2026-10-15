@@ -162,11 +162,11 @@ class Engine:
             alerts, names, max_alerts=self.digest_max_alerts
         )
         stored = self.store.create_digest(digest)
+        alert_ids = [alert.id for alert in alerts if alert.id is not None]
         if self._deliver_digest(stored, names):
+            self.store.attach_alerts_to_digest(stored.id, alert_ids)
             self.store.mark_digest_delivered(stored.id)
-            self.store.mark_notified(
-                [alert.id for alert in alerts if alert.id is not None]
-            )
+            self.store.mark_notified(alert_ids)
             stored.delivered = True
         return stored
 
