@@ -98,8 +98,21 @@ heterogeneous noise into a single prioritized alert stream.
   source documenting a critical dependency keeps surfacing everything. Entries
   below the floor are still persisted, so history, `/api/entries` and
   content-hash de-duplication are unaffected.
+- **Per-source scan intervals:** every source optionally carries a
+  `scan_interval_seconds` (a positive integer, default `None`). When set, the
+  background scheduler polls that source on its own cadence; when omitted the
+  source falls back to the deployment-wide `POLL_INTERVAL_SECONDS`, so existing
+  sources and databases are unchanged. The scheduler tracks the last scan time
+  per source and only scans a source once its effective interval has elapsed,
+  waking up at the smallest effective interval among enabled sources so a
+  fast-moving dependency is not held back by a slow global timer. Both the
+  per-source value and the global default are floored at 30 seconds to avoid
+  hammering a source. A manual `POST /api/check` (and `Engine.scan_all()`)
+  deliberately ignores the intervals and scans every enabled source.
 - **Persistence:** SQLite store with de-duplication by content hash, so the same
-  announcement is only alerted once.
+  announcement is only alerted once. The source table stores
+  `scan_interval_seconds`, and a lightweight migration adds the column to
+  databases created before it existed, leaving old rows at `NULL`.
 - **Per-source history API:** each source's recorded entries are browsable
   newest-first through `GET /api/sources/:id/entries` (optional `?limit=`,
   default `100`), so the stored history of one dependency can be inspected
@@ -148,8 +161,8 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity` and `notify_channels` (token protected) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `scan_interval_seconds`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels` and `scan_interval_seconds` (token protected) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
 | GET    | `/api/alerts`     | List alerts, newest first                 |
@@ -188,6 +201,26 @@ change. It means different things per kind:
 Every source also accepts an optional `min_severity` (`critical`, `warning` or
 `info`, default `info`). An entry is only turned into an alert when its severity
 ranks at or above this floor; lower-severity entries are still parsed and stored.
+
+## Scan cadence
+
+The optional `scan_interval_seconds` field on a source overrides the global
+`POLL_INTERVAL_SECONDS` cadence for that dependency. It is a positive integer
+(number of seconds) or omitted:
+
+- omitted (or `null`) → the source keeps the global cadence, the original
+  behaviour, so existing registrations and databases are unaffected;
+- `900` → the scheduler polls that source every 15 minutes;
+- `86400` → the scheduler polls that source once a day.
+
+A value that is zero, negative, non-integer or non-numeric is rejected with a
+`400` naming `scan_interval_seconds`. The background scheduler keeps an
+in-memory last-scan timestamp per source and only scans a source when its
+effective interval has elapsed; it wakes at the smallest effective interval so a
+15-minute source is still honoured when `POLL_INTERVAL_SECONDS` is an hour. The
+first tick after start scans every source. `POST /api/check` (and the engine's
+`scan_all()`) always scans every enabled source regardless of the field, so a
+manual check is never filtered by cadence.
 
 ## Routing
 
@@ -253,6 +286,13 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Acme Release Notes","url":"https://api.acme.com/changelog.json",
        "kind":"json","api_name":"Acme","selector":"data.releases",
        "notify_channels":["slack"]}'
+
+# Volatile dependency: poll every 15 minutes instead of the global hour.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Payments API","url":"https://status.payments.example/api/v2/incidents.json",
+       "kind":"statuspage","api_name":"Payments","tracked_versions":["v1"],
+       "min_severity":"warning","scan_interval_seconds":900}'
 ```
 
 ## Next direction
@@ -290,6 +330,11 @@ usable per dependency without adding a new external integration.
 `GET /api/sources/:id/entries` exposes one dependency's stored entry history
 newest-first, a first step toward richer per-dependency history views.
 
+*Shipped:* **per-source scan intervals** (see *Current capabilities*) — a
+`scan_interval_seconds` override that lets a volatile dependency be polled on a
+fast cadence while a stable SDK keeps the global `POLL_INTERVAL_SECONDS`,
+without changing the manual `POST /api/check` semantics.
+
 1. **More source adapters:** additional structured feeds beyond the shipped
    GitHub and GitLab releases and OpenAPI adapters. *Partially shipped:*
    the `gitlab` adapter now covers GitLab-hosted releases; further forges and
@@ -325,6 +370,13 @@ The design keeps a hard separation between I/O (`fetcher`), pure logic
 (`parsers`, `relevance`), state (`store`), side effects (`notify`) and the
 wiring (`engine`, `app`). This keeps the core testable offline with a fake
 fetcher and no network access.
+
+The `scheduler` sits on top of `engine`: it keeps an in-memory last-scan time
+per source, computes each source's effective interval (`scan_interval_seconds`
+or `POLL_INTERVAL_SECONDS`) and calls `engine.scan_sources` only for the sources
+that are due. `engine.scan_all` remains the "scan everything now" primitive used
+by the manual check endpoint, so the two entry points share one scanning
+implementation while keeping different cadence semantics.
 
 ## Constraints and risks
 

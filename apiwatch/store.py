@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS sources (
     selector TEXT,
     min_severity TEXT NOT NULL DEFAULT 'info',
     notify_channels TEXT NOT NULL DEFAULT '["all"]',
+    scan_interval_seconds INTEGER,
     created_at TEXT NOT NULL
 );
 
@@ -111,6 +112,11 @@ class Store:
                 "ALTER TABLE sources ADD COLUMN notify_channels "
                 "TEXT NOT NULL DEFAULT '[\"all\"]'"
             )
+        if "scan_interval_seconds" not in source_columns:
+            # Old rows keep ``NULL`` so they retain the global poll interval.
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN scan_interval_seconds INTEGER"
+            )
 
         alert_columns = {
             row["name"]
@@ -142,8 +148,8 @@ class Store:
             cur = self._conn.execute(
                 """INSERT INTO sources
                    (name, url, kind, api_name, tracked_versions, enabled, selector,
-                    min_severity, notify_channels, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    min_severity, notify_channels, scan_interval_seconds, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -154,6 +160,7 @@ class Store:
                     source.selector,
                     source.min_severity,
                     json.dumps(source.notify_channels),
+                    source.scan_interval_seconds,
                     _now(),
                 ),
             )
@@ -451,6 +458,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         selector=row["selector"],
         min_severity=row["min_severity"],
         notify_channels=json.loads(row["notify_channels"] or '["all"]'),
+        scan_interval_seconds=row["scan_interval_seconds"],
         created_at=row["created_at"],
     )
 
