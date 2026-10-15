@@ -38,7 +38,10 @@ heterogeneous noise into a single prioritized alert stream.
 
 - **Source registry:** add, list and remove monitored sources with a kind
   (`rss`, `html`, `json`, `statuspage`, `github`, `gitlab`, `openapi`), an API
-  name, the tracked versions and an optional per-source selector.
+  name, the tracked versions and an optional per-source selector. Each source
+  may also carry custom HTTP `headers` and a convenience `auth`
+  (`"user:password"`) so authenticated and otherwise gated feeds can be
+  monitored without forking the service.
 - **Parsers:** built-in parsers for RSS/Atom XML, JSON changelogs (several
   common shapes), HTML changelogs (headings + following content),
   statuspage.io JSON (`incidents` + `scheduled_maintenances`), GitHub
@@ -109,10 +112,23 @@ heterogeneous noise into a single prioritized alert stream.
   per-source value and the global default are floored at 30 seconds to avoid
   hammering a source. A manual `POST /api/check` (and `Engine.scan_all()`)
   deliberately ignores the intervals and scans every enabled source.
+- **Per-source request headers and basic auth:** every source optionally carries
+  a `headers` object (a JSON map of header name to value) and an `auth`
+  convenience field (`"user:password"`). The fetcher merges the custom headers
+  over its defaults (`User-Agent`, `Accept`) and, when `auth` is set, adds an
+  `Authorization: Basic <base64>` header. This unlocks private GitHub Enterprise
+  or GitLab self-managed instances, token-gated statuspage.io pages and internal
+  changelogs behind HTTP Basic auth without forking the service. Header names are
+  normalized case-insensitively to a canonical `Title-Case` form so
+  `user-agent` and `User-Agent` cannot both be stored; the last write wins.
+  A source with neither field behaves exactly as before. The dashboard shows a
+  compact lock / header-count indicator and never renders a header value or the
+  credentials.
 - **Persistence:** SQLite store with de-duplication by content hash, so the same
   announcement is only alerted once. The source table stores
-  `scan_interval_seconds`, and a lightweight migration adds the column to
-  databases created before it existed, leaving old rows at `NULL`.
+  `scan_interval_seconds`, `headers` (JSON text) and `auth` (text), and a
+  lightweight migration adds each column to databases created before it existed,
+  leaving old rows at `NULL`/empty (read back as `{}` / `None`).
 - **Per-source history API:** each source's recorded entries are browsable
   newest-first through `GET /api/sources/:id/entries` (optional `?limit=`,
   default `100`), so the stored history of one dependency can be inspected
@@ -172,8 +188,8 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url` and `scan_interval_seconds` (token protected) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `headers`, `auth`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `headers` and `auth` (token protected) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
 | GET    | `/api/alerts`     | List alerts, newest first                 |
@@ -277,6 +293,23 @@ retries it without aborting the run. The payload shape is:
 
 and, for digests, `{"digest": { "alert_count": 3, "severity": "warning", "...": "..." }}`.
 
+The optional `headers` field on a source is a JSON object mapping header names to
+string values. The fetcher merges it over the default `User-Agent`/`Accept`
+headers, so a token-gated feed can be registered with e.g.
+`{"X-Api-Key": "secret"}`. Header names are normalized case-insensitively to a
+canonical `Title-Case` form (`user-agent` and `User-Agent` collapse to the same
+key, last write wins). A header name that is empty or contains control
+characters/newlines, or a non-string or newline-containing value, is rejected
+with a `400` naming `headers`.
+
+The optional `auth` field is a convenience for HTTP Basic auth. It must be a
+`"user:password"` string with exactly one `:` and non-empty parts; the fetcher
+adds `Authorization: Basic <base64(user:password)>` when it is set. An invalid
+value (no colon, or an empty user/password) is rejected with a `400` naming
+`auth`. Credentials are stored in SQLite in plain text and returned by the API,
+so they must be protected like any other secret (restrict the data volume,
+`API_TOKEN` and network access). Neither field is logged.
+
 Example source registrations:
 
 ```sh
@@ -335,6 +368,19 @@ curl -X POST http://localhost:8080/api/sources \
        "kind":"statuspage","api_name":"Payments","tracked_versions":["v1"],
        "min_severity":"warning","notify_channels":["webhook"],
        "notify_webhook_url":"https://incidents.example/hooks/watchdog-critical"}'
+
+# Token-gated feed: send a custom header on every fetch of this source.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Private status","url":"https://status.corp.example/api/v2/incidents.json",
+       "kind":"statuspage","api_name":"Internal",
+       "headers":{"X-Api-Key":"secret-token","Accept":"application/json"}}'
+
+# HTTP Basic auth: the fetcher sends Authorization: Basic <base64(user:pass)>.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Self-managed GitLab","url":"https://gitlab.corp.example/group/project",
+       "kind":"gitlab","api_name":"Widget","auth":"bot:glpat-secret"}'
 ```
 
 ## Next direction
@@ -383,6 +429,13 @@ without changing the manual `POST /api/check` semantics.
 dependency can escalate to a dedicated incident endpoint. This advances the
 *Integrations* item below: alert routing no longer requires a hard-coded
 integration for each tracker or paging system.
+
+*Shipped:* **per-source request headers and basic auth** (see *Current
+capabilities*) — an optional `headers` map and an `auth` (`"user:password"`)
+field on each source, merged over the default request headers with an
+`Authorization: Basic` header added when `auth` is set, so authenticated and
+otherwise gated feeds (private GitHub Enterprise/GitLab, token-gated
+statuspages, internal changelogs) can be monitored without forking the service.
 
 1. **More source adapters:** additional structured feeds beyond the shipped
    GitHub and GitLab releases and OpenAPI adapters. *Partially shipped:*
@@ -437,5 +490,6 @@ implementation while keeping different cadence semantics.
 - Teams may ignore deprecation warnings; prioritization and low noise are the
   mitigation.
 - Integrating with private repositories or trackers raises access/privacy
-  questions; the MVP deliberately keeps credentials in the deployment
-  environment only.
+  questions. Per-source `headers`/`auth` credentials are stored in SQLite in
+  plain text, so the database volume, `API_TOKEN` and network access must be
+  protected like any other secret.

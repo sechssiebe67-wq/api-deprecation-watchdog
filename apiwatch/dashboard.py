@@ -81,11 +81,21 @@ def render_dashboard(
             return "%ss (global)" % default_interval
         return "global"
 
+    def _auth_indicator(source: Source) -> str:
+        """A compact lock/header-count badge that never reveals secret values."""
+        parts = []
+        if source.auth:
+            parts.append("\U0001F512")
+        if source.headers:
+            parts.append("%d hdr" % len(source.headers))
+        return " ".join(parts)
+
     if sources:
         source_rows = "".join(
             "<tr><td>%s</td><td><code>%s</code></td><td class=\"col-hide\">%s</td>"
             "<td class=\"col-hide\">%s</td><td>%s</td><td>%s</td><td>%s</td>"
-            "<td class=\"col-hide muted\">%s</td><td>%s</td>"
+            "<td class=\"col-hide muted\">%s</td><td class=\"col-hide\">%s</td>"
+            "<td>%s</td>"
             "<td><a href=\"/api/sources/%s/entries\">History</a></td></tr>"
             % (
                 _esc(source.name),
@@ -96,13 +106,14 @@ def render_dashboard(
                 _badge(source.min_severity),
                 _esc(", ".join(source.notify_channels)),
                 _esc(_truncate(source.notify_webhook_url) if source.notify_webhook_url else "\u2013"),
+                _esc(_auth_indicator(source)),
                 _esc("enabled" if source.enabled else "disabled"),
                 _esc(source.id),
             )
             for source in sources
         )
     else:
-        source_rows = '<tr><td colspan="10" class="muted">No sources registered yet.</td></tr>'
+        source_rows = '<tr><td colspan="11" class="muted">No sources registered yet.</td></tr>'
 
     if alerts:
         alert_rows = ""
@@ -177,7 +188,7 @@ def render_dashboard(
   </table>
   <h2>Monitored sources</h2>
   <table>
-    <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Interval</th><th>Min severity</th><th>Channels</th><th class="col-hide">Webhook</th><th>Status</th><th>History</th></tr></thead>
+    <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Interval</th><th>Min severity</th><th>Channels</th><th class="col-hide">Webhook</th><th class="col-hide">Auth</th><th>Status</th><th>History</th></tr></thead>
     <tbody>%s</tbody>
   </table>
   <p class="muted">JSON API: <code>/api/sources</code>, <code>/api/sources/:id/entries</code>, <code>/api/alerts</code>, <code>/api/entries</code>, <code>/api/digests</code>, <code>/api/stats</code>, <code>/api/check</code> (POST), <code>/api/digest/flush</code> (POST).</p>

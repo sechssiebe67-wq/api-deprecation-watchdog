@@ -184,6 +184,77 @@ class OpenAppTests(AppTestCase):
         self.assertEqual(status, 400)
         self.assertIn("min_severity", json.loads(body)["error"])
 
+    def test_create_source_with_headers_and_auth_round_trips(self):
+        status, body = self.request(
+            "POST",
+            "/api/sources",
+            {
+                "name": "Private",
+                "url": FEED_URL,
+                "kind": "rss",
+                "headers": {"X-Api-Key": "secret"},
+                "auth": "user:pass",
+            },
+        )
+        self.assertEqual(status, 201)
+        source = json.loads(body)
+        self.assertEqual(source["headers"], {"X-Api-Key": "secret"})
+        self.assertEqual(source["auth"], "user:pass")
+
+        status, body = self.request("GET", "/api/sources")
+        self.assertEqual(status, 200)
+        listed = json.loads(body)["sources"][0]
+        self.assertEqual(listed["headers"], {"X-Api-Key": "secret"})
+        self.assertEqual(listed["auth"], "user:pass")
+
+        status, body = self.request("GET", "/api/sources/%d" % source["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["headers"], {"X-Api-Key": "secret"})
+        self.assertEqual(json.loads(body)["auth"], "user:pass")
+
+    def test_source_without_headers_has_empty_defaults(self):
+        status, body = self.request(
+            "POST", "/api/sources", {"name": "Plain", "url": FEED_URL, "kind": "rss"}
+        )
+        self.assertEqual(status, 201)
+        source = json.loads(body)
+        self.assertEqual(source["headers"], {})
+        self.assertIsNone(source["auth"])
+
+    def test_headers_normalized_case_insensitively(self):
+        status, body = self.request(
+            "POST",
+            "/api/sources",
+            {
+                "name": "Plain",
+                "url": FEED_URL,
+                "kind": "rss",
+                "headers": {"user-agent": "watchdog"},
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(body)["headers"], {"User-Agent": "watchdog"})
+
+    def test_invalid_headers_rejected(self):
+        for headers in (["nope"], {"X-Api-Key": 1}, {"X-Api-Key": "a\nb"}):
+            status, body = self.request(
+                "POST",
+                "/api/sources",
+                {"name": "Bad", "url": FEED_URL, "kind": "rss", "headers": headers},
+            )
+            self.assertEqual(status, 400)
+            self.assertIn("headers", json.loads(body)["error"])
+
+    def test_invalid_auth_rejected(self):
+        for auth in ("nocolon", ":pass", "user:"):
+            status, body = self.request(
+                "POST",
+                "/api/sources",
+                {"name": "Bad", "url": FEED_URL, "kind": "rss", "auth": auth},
+            )
+            self.assertEqual(status, 400)
+            self.assertIn("auth", json.loads(body)["error"])
+
     def test_statuspage_source_and_check(self):
         self.fetcher.responses[STATUS_URL] = STATUSPAGE
         status, body = self.request(
