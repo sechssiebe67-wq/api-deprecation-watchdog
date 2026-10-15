@@ -73,6 +73,12 @@ spec:
                   name: {{ .Values.existingSecret }}
                   key: SLACK_WEBHOOK_URL
                   optional: true
+            - name: WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: WEBHOOK_URL
+                  optional: true
             - name: SMTP_HOST
               valueFrom:
                 secretKeyRef:

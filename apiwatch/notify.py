@@ -34,6 +34,9 @@ def format_alert(alert: Alert, source_name: str = "") -> str:
 
 class Notifier:
     name = "base"
+    # Subclasses that can target a per-source URL set this to ``True``. The
+    # engine then groups a batch by target URL and passes ``url=`` to ``send``.
+    supports_url_override = False
 
     def send(self, alerts: Sequence[Alert], source_names: Dict[int, str]) -> None:
         raise NotImplementedError
@@ -108,6 +111,50 @@ class SlackNotifier(Notifier):
             raise
         except Exception as exc:
             raise NotificationError("slack delivery failed: %s" % exc) from exc
+
+
+class WebhookNotifier(Notifier):
+    """POSTs a JSON payload to a configurable endpoint.
+
+    The payload is intentionally generic so any internal system (PagerDuty,
+    Opsgenie, Mattermost, custom incident tooling) can consume it without a
+    hard-coded integration. A per-source ``notify_webhook_url`` may override
+    the deployment-wide ``WEBHOOK_URL`` for a single send call via ``url``.
+    """
+
+    name = "webhook"
+    supports_url_override = True
+
+    def __init__(self, webhook_url: str) -> None:
+        self.webhook_url = webhook_url
+
+    def _post(self, url: str, payload: dict) -> None:
+        request = Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=10) as response:  # noqa: S310 (configured URL)
+                if response.status < 200 or response.status >= 300:
+                    raise NotificationError("webhook returned %s" % response.status)
+        except NotificationError:
+            raise
+        except Exception as exc:  # network and parsing errors alike
+            raise NotificationError("webhook delivery failed: %s" % exc) from exc
+
+    def send(self, alerts, source_names, url: str = None) -> None:
+        if not alerts:
+            return
+        payload = {
+            "alerts": [alert.to_dict() for alert in alerts],
+            "source_names": dict(source_names),
+        }
+        self._post(url or self.webhook_url, payload)
+
+    def send_digest(self, digest, source_names, url: str = None) -> None:
+        self._post(url or self.webhook_url, {"digest": digest.to_dict()})
 
 
 class EmailNotifier(Notifier):

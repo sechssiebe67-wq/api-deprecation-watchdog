@@ -47,10 +47,16 @@ actually use.
   stable SDK is checked once a day. Omitting it keeps the global cadence; a
   manual `POST /api/check` always scans every enabled source.
 - **SQLite history** with content-hash de-duplication (no repeated alerts).
-- **Notifications** via Slack webhook, SMTP e-mail and console.
+- **Notifications** via Slack webhook, SMTP e-mail, a generic JSON webhook and
+  console.
 - **Per-source notification routing** via a `notify_channels` list, so a chatty
   `info`-only source can go to Slack only while a critical dependency escalates
-  to e-mail. `all` (the default) keeps the fan-out to every notifier.
+  to e-mail or a webhook. `all` (the default) keeps the fan-out to every
+  notifier.
+- **Generic webhook delivery** that POSTs a dependency-free JSON payload to
+  `WEBHOOK_URL`, so any internal system can consume alerts. A per-source
+  `notify_webhook_url` overrides the global URL for one dependency's alerts and
+  digests.
 - **Digest notifications** that batch alerts into a single grouped, severity-
   ordered summary on a configurable cadence (`off`, `digest` or `both`).
 - **Web dashboard** with an `Interval` column showing each source's cadence (or
@@ -92,6 +98,7 @@ All configuration is environment based:
 | `NOTIFY_CHANNELS`        | `all`   | Default routing for sources that omit `notify_channels`; comma-separated `console`, `slack`, `email` or `all` |
 | `API_TOKEN`              | –       | Bearer token required for mutating endpoints        |
 | `SLACK_WEBHOOK_URL`      | –       | Slack incoming webhook for alert delivery           |
+| `WEBHOOK_URL`            | –       | Generic JSON webhook for the `webhook` channel; per-source `notify_webhook_url` overrides it |
 | `SMTP_HOST` / `SMTP_PORT`| – / `587` | SMTP server for e-mail alerts                     |
 | `SMTP_USER` / `SMTP_PASSWORD` | –  | SMTP credentials                                    |
 | `SMTP_FROM` / `SMTP_TO`  | –       | Sender and comma-separated recipients               |
@@ -132,7 +139,8 @@ Register a source. The `POST /api/sources` payload accepts:
 | `selector`         | no       | Extraction hint; CSS-like for `html`, dotted path for `json`/`github`/`gitlab`/`openapi` |
 | `enabled`          | no       | Whether the scheduler polls it (default `true`)               |
 | `min_severity`     | no       | Lowest severity that creates an alert: `critical`, `warning` or `info` (default `info`) |
-| `notify_channels`  | no       | Channels that receive this source's alerts: a list of `console`, `slack`, `email` or `all` (default `all`) |
+| `notify_channels`  | no       | Channels that receive this source's alerts: a list of `console`, `slack`, `email`, `webhook` or `all` (default `all`) |
+| `notify_webhook_url` | no     | `http(s)` URL that overrides `WEBHOOK_URL` for this source's alerts and digests |
 | `scan_interval_seconds` | no  | Positive integer override for this source's polling cadence; omitted keeps the global `POLL_INTERVAL_SECONDS` |
 
 For `html`, `selector` is a CSS-like simple selector (optional tag, `#id`,
@@ -192,12 +200,50 @@ notes but still alerts on `warning` and `critical` deprecations. Entries below
 the floor remain in the history (`/api/entries`) and are de-duplicated normally.
 
 `notify_channels` controls where a source's alerts are delivered. It is a list
-of `console`, `slack`, `email` or the literal `all`; omitting the field defaults
-to `all`, which fans every alert out to every configured notifier (the legacy
-behaviour). An empty list is treated as `all`. The same routing applies to
-digest delivery: each notifier receives a digest containing only the alerts
-routed to it. Set `NOTIFY_CHANNELS` to change the default for sources that omit
-the field. Unknown channel names are rejected with `400`.
+of `console`, `slack`, `email`, `webhook` or the literal `all`; omitting the
+field defaults to `all`, which fans every alert out to every configured notifier
+(the legacy behaviour). An empty list is treated as `all`. The same routing
+applies to digest delivery: each notifier receives a digest containing only the
+alerts routed to it. Set `NOTIFY_CHANNELS` to change the default for sources that
+omit the field. Unknown channel names are rejected with a `400` that lists the
+allowed channels, including `webhook`.
+
+The `webhook` channel POSTs JSON to `WEBHOOK_URL` (configure it to enable the
+channel). Alerts are delivered as:
+
+```json
+{
+  "alerts": [
+    {
+      "id": 1,
+      "source_id": 1,
+      "entry_id": 1,
+      "severity": "critical",
+      "reason": "v1 is deprecated and will be removed",
+      "matched_terms": ["deprecated"],
+      "version_hits": ["v1"],
+      "title": "v1 deprecated",
+      "link": "https://example.com/changelog#v1",
+      "notified": false,
+      "digest_id": null,
+      "created_at": "2024-05-01T00:00:00+00:00"
+    }
+  ],
+  "source_names": { "1": "Stripe" }
+}
+```
+
+Digests are delivered as `{"digest": { ... }}`, where the object is the digest's
+JSON form (`alert_count`, `severity`, `subject`, `body`, `omitted`, `delivered`,
+`created_at`). A non-`2xx` response or a network error raises
+`NotificationError`; the engine logs it and leaves the alert pending
+(`notified = 0`) so the next scan or digest retries it.
+
+`notify_webhook_url` overrides `WEBHOOK_URL` for one source. It must be an
+`http(s)` URL or omitted; an invalid value is rejected with a `400` naming the
+field. Sources without an override keep the global `WEBHOOK_URL`, so a critical
+dependency can post to a dedicated incident endpoint while a chatty source uses
+the shared one.
 
 `scan_interval_seconds` overrides the global `POLL_INTERVAL_SECONDS` cadence for
 one source. It is a positive integer number of seconds; omitting it (or sending
@@ -286,6 +332,15 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Payments API","url":"https://status.payments.example/api/v2/incidents.json",
        "kind":"statuspage","api_name":"Payments","tracked_versions":["v1"],
        "min_severity":"warning","scan_interval_seconds":900}'
+
+# Critical dependency: POST its alerts to a dedicated incident endpoint.
+# Sources without the override keep using the global WEBHOOK_URL.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Payments API","url":"https://status.payments.example/api/v2/incidents.json",
+       "kind":"statuspage","api_name":"Payments","tracked_versions":["v1"],
+       "min_severity":"warning","notify_channels":["webhook"],
+       "notify_webhook_url":"https://incidents.example/hooks/watchdog-critical"}'
 ```
 
 ## Digest notifications
@@ -338,8 +393,8 @@ helm install watchdog deploy/helm/api-deprecation-watchdog \
   --set existingSecret=watchdog-secrets
 ```
 
-`existingSecret` should provide `API_TOKEN`, `SLACK_WEBHOOK_URL` and `SMTP_*`
-keys. `.github/workflows/factory-release.yml` builds and publishes the multi-arch
+`existingSecret` should provide `API_TOKEN`, `SLACK_WEBHOOK_URL`, `WEBHOOK_URL`
+and `SMTP_*` keys. `.github/workflows/factory-release.yml` builds and publishes the multi-arch
 image and the immutable release manifest.
 
 ## Development

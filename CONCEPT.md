@@ -7,7 +7,7 @@ official changelogs, deprecation feeds and status pages of the external APIs and
 SDKs a team depends on. It extracts the changes that actually matter, scores them
 by how likely they are to break an existing integration, stores a full history,
 and pushes prioritized warnings into the channels developers already use
-(Slack, e-mail, and the built-in dashboard).
+(Slack, e-mail, an outbound JSON webhook, and the built-in dashboard).
 
 The product exists because deprecations and breaking changes are usually
 announced in prose — buried in a changelog, a blog post or a dashboard banner —
@@ -119,18 +119,29 @@ heterogeneous noise into a single prioritized alert stream.
   without filtering the global `/api/entries` feed. An unknown id returns `404`
   and a non-integer id or limit returns `400`; the `/entries` suffix leaves
   `GET` and `DELETE /api/sources/:id` unchanged.
-- **Notifications:** Slack incoming webhook, SMTP e-mail and a console channel;
-  channels are optional and enabled through configuration.
+- **Notifications:** Slack incoming webhook, SMTP e-mail, a generic JSON
+  webhook and a console channel; channels are optional and enabled through
+  configuration. The `webhook` channel POSTs a dependency-free JSON payload to
+  `WEBHOOK_URL`, so a team can integrate any internal system (PagerDuty,
+  Opsgenie, Mattermost, custom incident tooling) without adding a new external
+  dependency or hard-coded integration.
 - **Per-source notification routing:** every source carries a `notify_channels`
-  list naming the notifier channels it may target (`console`, `slack`, `email`)
-  or the literal `all`. The default is `["all"]`, which preserves the original
-  fan-out to every configured notifier, so existing sources and deployments are
-  unchanged. A chatty `info`-only source can be routed to Slack only, while a
-  critical dependency can be escalated to a dedicated e-mail channel; an empty
-  list is treated as `all`. The same routing applies to digests: alerts are
-  grouped by their recipient set and each notifier receives only the alerts
-  routed to it, so a notifier with no matching alert is never invoked and a
-  routed alert stays pending until a matching notifier accepts it.
+  list naming the notifier channels it may target (`console`, `slack`, `email`,
+  `webhook`) or the literal `all`. The default is `["all"]`, which preserves the
+  original fan-out to every configured notifier, so existing sources and
+  deployments are unchanged. A chatty `info`-only source can be routed to Slack
+  only, while a critical dependency can be escalated to a dedicated e-mail or
+  webhook endpoint; an empty list is treated as `all`. The same routing applies
+  to digests: alerts are grouped by their recipient set and each notifier
+  receives only the alerts routed to it, so a notifier with no matching alert is
+  never invoked and a routed alert stays pending until a matching notifier
+  accepts it.
+- **Per-source webhook override:** a source may set `notify_webhook_url` to an
+  `http(s)` URL that overrides the global `WEBHOOK_URL` for that source's
+  alerts (and its digests). This lets a critical dependency escalate to a
+  dedicated incident endpoint while a chatty source keeps the default target.
+  The field is optional; when omitted the source uses the global URL, and old
+  databases are migrated with the column left `NULL`.
 - **Digest notifications:** an optional digest mode that buffers new alerts and
   delivers one grouped summary per digest window instead of one message per
   scan. Alerts are grouped by source, ordered by severity (critical > warning >
@@ -161,8 +172,8 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `scan_interval_seconds`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels` and `scan_interval_seconds` (token protected) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url` and `scan_interval_seconds` (token protected) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
 | GET    | `/api/alerts`     | List alerts, newest first                 |
@@ -225,23 +236,46 @@ manual check is never filtered by cadence.
 ## Routing
 
 The optional `notify_channels` field on a source selects which notifier channels
-receive its alerts. It is a list whose entries are `console`, `slack`, `email`
-or the literal `all`:
+receive its alerts. It is a list whose entries are `console`, `slack`, `email`,
+`webhook` or the literal `all`:
 
 - omitted or `all` (the default) → every configured notifier, the original
   fan-out behaviour;
 - `["slack"]` → only the Slack notifier;
 - `["email"]` → only the e-mail notifier;
+- `["webhook"]` → only the generic webhook notifier;
 - `["console", "slack"]` → the console and Slack notifiers;
 - `[]` (empty list) → treated as `all`.
 
-Unknown entries are rejected with a `400` that names the allowed values. The
-deployment-wide `NOTIFY_CHANNELS` environment variable supplies the default for
-sources that omit the field, so an operator can change the default without
-editing every source. The engine honours the field for both immediate dispatch
-and digest delivery: a notifier is only invoked when at least one alert is routed
-to it, and an alert is only marked notified once a routed notifier has accepted
-it, so routing never silently drops an alert.
+Unknown entries are rejected with a `400` that names the allowed values (the
+message lists `webhook`). The deployment-wide `NOTIFY_CHANNELS` environment
+variable supplies the default for sources that omit the field, so an operator can
+change the default without editing every source. The engine honours the field for
+both immediate dispatch and digest delivery: a notifier is only invoked when at
+least one alert is routed to it, and an alert is only marked notified once a
+routed notifier has accepted it, so routing never silently drops an alert.
+
+The optional `notify_webhook_url` field on a source overrides the deployment-wide
+`WEBHOOK_URL` for that source. It must be an `http(s)` URL when present and is
+rejected with a `400` naming the field otherwise. The engine resolves the target
+URL per alert: sources with an override are delivered to their own endpoint,
+while sources without one fall back to `WEBHOOK_URL`. The same grouping is
+applied to digests, so a digest built for a source that sets an override is
+POSTed to that URL rather than the global one.
+
+The `webhook` notifier POSTs a small JSON body and treats anything other than a
+`2xx` response — or a network error — as a `NotificationError`. That error is
+logged and leaves the alert pending (`notified = 0`) so the next scan or digest
+retries it without aborting the run. The payload shape is:
+
+```json
+{
+  "alerts": [ { "id": 1, "source_id": 1, "severity": "critical", "reason": "v1 is deprecated", "...": "..." } ],
+  "source_names": { "1": "Stripe" }
+}
+```
+
+and, for digests, `{"digest": { "alert_count": 3, "severity": "warning", "...": "..." }}`.
 
 Example source registrations:
 
@@ -293,6 +327,14 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Payments API","url":"https://status.payments.example/api/v2/incidents.json",
        "kind":"statuspage","api_name":"Payments","tracked_versions":["v1"],
        "min_severity":"warning","scan_interval_seconds":900}'
+
+# Critical dependency: escalate to a dedicated incident endpoint via webhook.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Payments API","url":"https://status.payments.example/api/v2/incidents.json",
+       "kind":"statuspage","api_name":"Payments","tracked_versions":["v1"],
+       "min_severity":"warning","notify_channels":["webhook"],
+       "notify_webhook_url":"https://incidents.example/hooks/watchdog-critical"}'
 ```
 
 ## Next direction
@@ -335,6 +377,13 @@ newest-first, a first step toward richer per-dependency history views.
 fast cadence while a stable SDK keeps the global `POLL_INTERVAL_SECONDS`,
 without changing the manual `POST /api/check` semantics.
 
+*Shipped:* **generic webhook adapter** (see *Current capabilities*) — a
+`webhook` notifier channel that POSTs a dependency-free JSON payload to
+`WEBHOOK_URL`, plus a per-source `notify_webhook_url` override so a critical
+dependency can escalate to a dedicated incident endpoint. This advances the
+*Integrations* item below: alert routing no longer requires a hard-coded
+integration for each tracker or paging system.
+
 1. **More source adapters:** additional structured feeds beyond the shipped
    GitHub and GitLab releases and OpenAPI adapters. *Partially shipped:*
    the `gitlab` adapter now covers GitLab-hosted releases; further forges and
@@ -345,8 +394,9 @@ without changing the manual `POST /api/check` semantics.
    tune the volume and destination of alerts per dependency.
 3. **Integrations:** GitHub/GitLab issues and Jira as delivery targets.
    *Partially shipped:* per-source `notify_channels` routes alerts to the
-   existing Slack, e-mail and console channels; tracker integrations remain to
-   be built.
+   existing Slack, e-mail, console and generic `webhook` channels, and the
+   webhook adapter lets any internal system be wired up without a hard-coded
+   integration; first-class tracker integrations remain to be built.
 4. **Multi-tenant onboarding:** organizations, API keys and shared source
    templates for the manual concierge phase.
 5. **Metrics export:** Prometheus endpoint for adoption and reliability
@@ -356,7 +406,7 @@ without changing the manual `POST /api/check` semantics.
 
 ```
 sources ──▶ fetcher ──▶ parsers ──▶ relevance ──▶ store (SQLite)
-                          │                     └─▶ notifiers (Slack / e-mail / console)
+                          │                     └─▶ notifiers (Slack / e-mail / webhook / console)
                           └─ adapters: rss · html · json · statuspage · github · gitlab · openapi
                                                         ▲
 HTTP API + dashboard ──▶ engine (scan) ──▶ scheduler (background poll)

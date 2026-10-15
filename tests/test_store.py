@@ -107,6 +107,77 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(fetched.min_severity, "warning")
         self.assertEqual(self.store.list_sources()[0].min_severity, "warning")
 
+    def test_source_notify_webhook_url_round_trip(self):
+        created = self.store.add_source(
+            self._source(notify_webhook_url="https://example.test/critical")
+        )
+        self.assertEqual(created.notify_webhook_url, "https://example.test/critical")
+        self.assertEqual(
+            created.to_dict()["notify_webhook_url"], "https://example.test/critical"
+        )
+        self.assertEqual(
+            self.store.get_source(created.id).notify_webhook_url,
+            "https://example.test/critical",
+        )
+        self.assertEqual(
+            self.store.list_sources()[0].notify_webhook_url,
+            "https://example.test/critical",
+        )
+
+    def test_source_notify_webhook_url_defaults_to_none(self):
+        created = self.store.add_source(self._source())
+        self.assertIsNone(created.notify_webhook_url)
+        self.assertIsNone(self.store.get_source(created.id).notify_webhook_url)
+        self.assertIsNone(created.to_dict()["notify_webhook_url"])
+
+    def test_migrates_sources_table_without_notify_webhook_url(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = sqlite3.connect(path)
+            conn.executescript(
+                """
+                CREATE TABLE sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    api_name TEXT NOT NULL DEFAULT '',
+                    tracked_versions TEXT NOT NULL DEFAULT '[]',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    selector TEXT,
+                    min_severity TEXT NOT NULL DEFAULT 'info',
+                    notify_channels TEXT NOT NULL DEFAULT '["all"]',
+                    scan_interval_seconds INTEGER,
+                    created_at TEXT NOT NULL
+                );
+                INSERT INTO sources
+                    (name, url, kind, api_name, tracked_versions, enabled, selector,
+                     min_severity, notify_channels, scan_interval_seconds, created_at)
+                VALUES ('Legacy', 'https://legacy.example/feed', 'rss', '', '[]', 1, NULL,
+                        'info', '["all"]', NULL, '2024-01-01');
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            store = Store(path)
+            columns = {
+                row["name"]
+                for row in store._conn.execute("PRAGMA table_info(sources)").fetchall()
+            }
+            self.assertIn("notify_webhook_url", columns)
+            legacy = store.list_sources()[0]
+            self.assertEqual(legacy.name, "Legacy")
+            self.assertIsNone(legacy.notify_webhook_url)
+            fresh = store.add_source(
+                self._source(name="New", notify_webhook_url="https://new.example/hook")
+            )
+            self.assertEqual(fresh.notify_webhook_url, "https://new.example/hook")
+            store.close()
+        finally:
+            os.remove(path)
+
     def test_migrates_sources_table_without_min_severity(self):
         fd, path = tempfile.mkstemp(suffix=".db")
         os.close(fd)

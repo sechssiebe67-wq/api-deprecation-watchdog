@@ -45,6 +45,12 @@ def _badge(severity: str) -> str:
     return '<span class="badge %s">%s</span>' % (severity, _esc(severity.upper()))
 
 
+def _truncate(value: str, limit: int = 48) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1] + "\u2026"
+
+
 def render_dashboard(
     stats: dict,
     sources: List[Source],
@@ -79,7 +85,7 @@ def render_dashboard(
         source_rows = "".join(
             "<tr><td>%s</td><td><code>%s</code></td><td class=\"col-hide\">%s</td>"
             "<td class=\"col-hide\">%s</td><td>%s</td><td>%s</td><td>%s</td>"
-            "<td>%s</td>"
+            "<td class=\"col-hide muted\">%s</td><td>%s</td>"
             "<td><a href=\"/api/sources/%s/entries\">History</a></td></tr>"
             % (
                 _esc(source.name),
@@ -89,13 +95,14 @@ def render_dashboard(
                 _esc(_interval_label(source)),
                 _badge(source.min_severity),
                 _esc(", ".join(source.notify_channels)),
+                _esc(_truncate(source.notify_webhook_url) if source.notify_webhook_url else "\u2013"),
                 _esc("enabled" if source.enabled else "disabled"),
                 _esc(source.id),
             )
             for source in sources
         )
     else:
-        source_rows = '<tr><td colspan="9" class="muted">No sources registered yet.</td></tr>'
+        source_rows = '<tr><td colspan="10" class="muted">No sources registered yet.</td></tr>'
 
     if alerts:
         alert_rows = ""
@@ -170,7 +177,7 @@ def render_dashboard(
   </table>
   <h2>Monitored sources</h2>
   <table>
-    <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Interval</th><th>Min severity</th><th>Channels</th><th>Status</th><th>History</th></tr></thead>
+    <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Interval</th><th>Min severity</th><th>Channels</th><th class="col-hide">Webhook</th><th>Status</th><th>History</th></tr></thead>
     <tbody>%s</tbody>
   </table>
   <p class="muted">JSON API: <code>/api/sources</code>, <code>/api/sources/:id/entries</code>, <code>/api/alerts</code>, <code>/api/entries</code>, <code>/api/digests</code>, <code>/api/stats</code>, <code>/api/check</code> (POST), <code>/api/digest/flush</code> (POST).</p>

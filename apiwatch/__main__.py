@@ -10,7 +10,7 @@ from .app import create_server
 from .config import Config
 from .engine import Engine, seed_default_sources
 from .fetcher import Fetcher
-from .notify import ConsoleNotifier, EmailNotifier, SlackNotifier
+from .notify import ConsoleNotifier, EmailNotifier, SlackNotifier, WebhookNotifier
 from .scheduler import Scheduler
 from .sources import default_sources
 from .store import Store
@@ -28,6 +28,8 @@ def build_notifiers(config: Config):
     notifiers = [ConsoleNotifier()]
     if config.slack_webhook_url:
         notifiers.append(SlackNotifier(config.slack_webhook_url))
+    if config.webhook_url:
+        notifiers.append(WebhookNotifier(config.webhook_url))
     if config.smtp_host and config.smtp_to:
         notifiers.append(
             EmailNotifier(

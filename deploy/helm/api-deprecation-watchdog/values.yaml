@@ -79,7 +79,7 @@ config:
   seedSources: true
   logLevel: INFO
   # Default routing for sources that omit `notify_channels`: a comma-separated
-  # list of `console`, `slack`, `email` or `all`.
+  # list of `console`, `slack`, `email`, `webhook` or `all`.
   notifyChannels: "all"
   # off | digest | both. "digest" buffers alerts into scheduled summaries;
   # "both" sends immediate alerts and also includes them in the next digest.
@@ -92,7 +92,8 @@ extraEnv: []
 #  - name: SMTP_TO
 #    value: ops@example.com
 
-# Optional existing Secret holding API_TOKEN, SLACK_WEBHOOK_URL and SMTP_* keys.
+# Optional existing Secret holding API_TOKEN, SLACK_WEBHOOK_URL, WEBHOOK_URL and
+# SMTP_* keys.
 existingSecret: ""
 
 livenessProbe:

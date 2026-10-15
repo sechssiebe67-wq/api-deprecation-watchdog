@@ -55,6 +55,7 @@ class Config:
     disable_scheduler: bool = False
     api_token: Optional[str] = None
     slack_webhook_url: Optional[str] = None
+    webhook_url: Optional[str] = None
     smtp_host: Optional[str] = None
     smtp_port: int = 587
     smtp_user: Optional[str] = None
@@ -89,6 +90,7 @@ class Config:
             disable_scheduler=_bool(env.get("DISABLE_SCHEDULER")),
             api_token=env.get("API_TOKEN") or None,
             slack_webhook_url=env.get("SLACK_WEBHOOK_URL") or None,
+            webhook_url=env.get("WEBHOOK_URL") or None,
             smtp_host=env.get("SMTP_HOST") or None,
             smtp_port=int(env.get("SMTP_PORT") or 587),
             smtp_user=env.get("SMTP_USER") or None,

@@ -130,6 +130,13 @@ def validate_source_payload(
             "'notify_channels' entries must be one of %s or 'all'"
             % ", ".join(NOTIFY_CHANNELS),
         )
+    notify_webhook_url = payload.get("notify_webhook_url")
+    if notify_webhook_url is not None:
+        if not isinstance(notify_webhook_url, str) or not notify_webhook_url.strip().startswith(
+            ("http://", "https://")
+        ):
+            raise ApiError(400, "'notify_webhook_url' must be an http(s) URL")
+        notify_webhook_url = notify_webhook_url.strip()
     scan_interval = payload.get("scan_interval_seconds")
     if scan_interval is not None:
         # ``bool`` is an ``int`` subclass but is not a meaningful interval.
@@ -151,6 +158,7 @@ def validate_source_payload(
         selector=selector,
         min_severity=min_severity.strip().lower(),
         notify_channels=normalized_channels,
+        notify_webhook_url=notify_webhook_url,
         scan_interval_seconds=scan_interval,
     )
 

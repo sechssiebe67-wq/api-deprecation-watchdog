@@ -169,6 +169,7 @@ class Engine:
             return
         names = self._source_names()
         channels = self._source_channels()
+        webhook_urls = self._source_webhook_urls()
         delivered_ids = set()
         for notifier in self.notifiers:
             batch = [
@@ -178,17 +179,21 @@ class Engine:
             ]
             if not batch:
                 continue
-            try:
-                notifier.send(batch, names)
-            except NotificationError as exc:
-                log.warning("notifier %s failed: %s", notifier.name, exc)
-                continue
-            except Exception as exc:  # pragma: no cover - defensive
-                log.warning("notifier %s crashed: %s", notifier.name, exc)
-                continue
-            for alert in batch:
-                if alert.id is not None:
-                    delivered_ids.add(alert.id)
+            for group, url in self._notifier_groups(notifier, batch, webhook_urls):
+                try:
+                    if url is None:
+                        notifier.send(group, names)
+                    else:
+                        notifier.send(group, names, url=url)
+                except NotificationError as exc:
+                    log.warning("notifier %s failed: %s", notifier.name, exc)
+                    continue
+                except Exception as exc:  # pragma: no cover - defensive
+                    log.warning("notifier %s crashed: %s", notifier.name, exc)
+                    continue
+                for alert in group:
+                    if alert.id is not None:
+                        delivered_ids.add(alert.id)
         if mark and delivered_ids:
             self.store.mark_notified(sorted(delivered_ids))
 
@@ -219,13 +224,22 @@ class Engine:
             return stored
 
         channels = self._source_channels()
-        groups: Dict[frozenset, List[Alert]] = {}
+        webhook_urls = self._source_webhook_urls()
+        groups: Dict[tuple, List[Alert]] = {}
         for alert in alerts:
             recipients = self._recipients(channels.get(alert.source_id))
-            groups.setdefault(recipients, []).append(alert)
+            # A per-source webhook URL only matters when the group is routed to
+            # the webhook channel; split those groups so each endpoint receives
+            # only its own source's alerts.
+            target = (
+                webhook_urls.get(alert.source_id)
+                if "webhook" in recipients
+                else None
+            )
+            groups.setdefault((recipients, target), []).append(alert)
 
         last: Optional[Digest] = None
-        for recipients, group_alerts in groups.items():
+        for (recipients, target), group_alerts in groups.items():
             if not recipients:
                 # Routed to a channel that is not configured: leave it pending
                 # so it is delivered once that notifier is enabled.
@@ -239,8 +253,16 @@ class Engine:
             for notifier in self.notifiers:
                 if notifier.name not in recipients:
                     continue
+                url = (
+                    target
+                    if getattr(notifier, "supports_url_override", False)
+                    else None
+                )
                 try:
-                    notifier.send_digest(stored, names)
+                    if url is None:
+                        notifier.send_digest(stored, names)
+                    else:
+                        notifier.send_digest(stored, names, url=url)
                 except NotificationError as exc:
                     log.warning("digest notifier %s failed: %s", notifier.name, exc)
                     continue
@@ -272,6 +294,33 @@ class Engine:
             for source in self.store.list_sources()
             if source.id is not None
         }
+
+    def _source_webhook_urls(self) -> Dict[int, Optional[str]]:
+        """Per-source webhook overrides, keyed by source id (``None`` = global)."""
+        return {
+            source.id: source.notify_webhook_url
+            for source in self.store.list_sources()
+            if source.id is not None
+        }
+
+    def _notifier_groups(
+        self,
+        notifier: Notifier,
+        batch: List[Alert],
+        webhook_urls: Dict[int, Optional[str]],
+    ):
+        """Split a notifier's batch into ``(alerts, url)`` groups.
+
+        Only notifiers that advertise ``supports_url_override`` are grouped by
+        their source's webhook URL; every other notifier receives the whole
+        batch under a ``None`` URL, preserving the existing behaviour.
+        """
+        if not getattr(notifier, "supports_url_override", False):
+            return [(batch, None)]
+        groups: Dict[Optional[str], List[Alert]] = {}
+        for alert in batch:
+            groups.setdefault(webhook_urls.get(alert.source_id), []).append(alert)
+        return [(group, url) for url, group in groups.items()]
 
     @staticmethod
     def _routes_to(channels: Optional[Sequence[str]], notifier_name: str) -> bool:
