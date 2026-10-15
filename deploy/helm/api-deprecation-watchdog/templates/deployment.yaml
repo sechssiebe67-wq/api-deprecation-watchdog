@@ -66,6 +66,10 @@ spec:
               value: {{ .Values.config.breakerThreshold | quote }}
             - name: BREAKER_COOLDOWN_SECONDS
               value: {{ .Values.config.breakerCooldownSeconds | quote }}
+            - name: RETENTION_DAYS
+              value: {{ .Values.config.retentionDays | quote }}
+            - name: MAINTENANCE_INTERVAL_SECONDS
+              value: {{ .Values.config.maintenanceIntervalSeconds | quote }}
             {{- if .Values.existingSecret }}
             - name: API_TOKEN
               valueFrom:

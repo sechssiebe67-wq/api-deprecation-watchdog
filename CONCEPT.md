@@ -243,6 +243,14 @@ heterogeneous noise into a single prioritized alert stream.
   `?limit=` (default `1000`, maximum `10000`) caps entries, alerts and digests
   independently while sources are always returned in full. The dashboard header
   carries a `Download JSON` link pointing at the same endpoint.
+- **Bounded history (retention):** a configurable per-source entry retention
+  policy bounds how long parsed entries (and the alerts derived from them)
+  survive in SQLite, so a long-running deployment does not grow the database
+  without limit. A global `RETENTION_DAYS` default (also readable as
+  `retention_days` per source) sets the window; the scheduler prunes on a
+  configurable maintenance cadence and `POST /api/prune` prunes on demand. The
+  `sources` registry and `digests` are never pruned, so the catalog and the
+  aggregate history stay intact.
 - **Web dashboard:** an accessible overview of sources, recent alerts, recent
   digests, pending-digest alerts and scan statistics, plus a JSON API and a
   `Download JSON` link to the export endpoint.
@@ -256,8 +264,8 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
 | GET    | `/api/sources/:id`| Fetch one source (incl. `scan_jitter_seconds` and breaker fields) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's `failure_count` and `breaker_until` (token protected) |
@@ -268,6 +276,7 @@ heterogeneous noise into a single prioritized alert stream.
 | GET    | `/api/digests/:id`| Fetch one digest (`404` when unknown)     |
 | POST   | `/api/digest/flush`| Build and deliver a digest (token protected) |
 | POST   | `/api/check`      | Run a scan now (token protected)          |
+| POST   | `/api/prune`      | Prune entries past their retention window now (token protected); returns `entries_pruned` and `alerts_pruned` |
 | GET    | `/api/stats`      | Aggregate counters (incl. `sources_tripped`) |
 | GET    | `/api/export`     | Full JSON snapshot of sources, entries, alerts and digests (`?limit=`, default `1000`, max `10000`) |
 
@@ -490,6 +499,56 @@ curl -X POST http://localhost:8080/api/sources \
   -H 'Content-Type: application/json' \
   -d '{"name":"Huge changelog","url":"https://api.acme.com/changelog.json",
        "kind":"json","api_name":"Acme","max_bytes":524288}'
+```
+
+## Retention
+
+API Deprecation Watchdog is a self-hosted, dependency-free service for platform
+and integration teams and their on-call engineers. It keeps a full per-dependency
+entry history and turns deprecations into prioritized alerts. The history is
+useful, but an unbounded SQLite file is not: a deployment that runs for years
+would otherwise retain every parsed changelog item forever, even long after the
+alert it produced has been acted on. Retention bounds that growth without
+weakening the product's guarantees.
+
+- **Global default:** `RETENTION_DAYS` (integer, default `0`, floored at `0`)
+  sets the deployment-wide window. `0` disables pruning, which is the legacy
+  behaviour.
+- **Per-source override:** the optional positive integer `retention_days` on a
+  source overrides the global default for that dependency. Omitted or `null`
+  leaves the source on the global default; `0`, negative, non-integer and
+  boolean values are rejected with a `400` naming `retention_days`.
+- **Prune pass:** `Store.prune_entries(retention_days, source_overrides, now)`
+  deletes entries whose `created_at` is older than the effective window per
+  source and deletes exactly the alerts whose `entry_id` was pruned, returning
+  the counts. `Engine.prune()` supplies the per-source overrides and the current
+  time; the scheduler calls it on a configurable maintenance cadence
+  (`MAINTENANCE_INTERVAL_SECONDS`, default daily) and `POST /api/prune` triggers
+  it on demand (token protected).
+- **Never pruned:** `sources` and `digests` are never deleted by a prune, so the
+  registry, delivered digests and the aggregate `stats` counters survive. Only
+  the per-source entry history and the alerts derived from it are bounded.
+- **Migration:** databases created before this feature gain the `retention_days`
+  column automatically and read back as `null`, so existing deployments inherit
+  the global default.
+
+With `RETENTION_DAYS=0` and no per-source overrides a prune is a no-op that
+returns zero counts, so existing deployments are unaffected until an operator
+opts in.
+
+```sh
+# Keep the global history bounded at 90 days, but trim one chatty dependency to 7.
+RETENTION_DAYS=90 python3 -m apiwatch
+
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Chatty","url":"https://chatty.example/changelog.json",
+       "kind":"json","retention_days":7}'
+
+# Prune now (token protected when API_TOKEN is set).
+curl -X POST http://localhost:8080/api/prune \
+  -H "Authorization: Bearer $API_TOKEN"
+# -> {"entries_pruned": 12, "alerts_pruned": 9}
 ```
 
 ## Routing
@@ -719,6 +778,14 @@ per-source `max_bytes` cap how much of each response body is read and stored,
 the engine parses a clipped body gracefully instead of dropping it or tripping
 the breaker, and the `truncated` signal reaches the API, stats and dashboard.
 
+*Shipped:* **bounded history (retention)** (see *Current capabilities* and
+*Retention*) — a global `RETENTION_DAYS` default plus an optional per-source
+`retention_days` define how long entries (and the alerts derived from them)
+survive; a scheduler maintenance pass and the token-protected `POST /api/prune`
+endpoint prune on the chosen cadence, while `sources` and `digests` are never
+deleted. This is the next increment on top of the per-source history API and
+keeps a long-running deployment's SQLite file bounded.
+
 1. **More source adapters:** additional structured feeds beyond the shipped
    GitHub and GitLab releases and OpenAPI adapters. *Partially shipped:*
    the `gitlab` adapter now covers GitLab-hosted releases; further forges and
@@ -770,6 +837,10 @@ jitter spreads load without delaying a due source indefinitely or busy-looping.
 check endpoint, so the two entry points share one scanning implementation while
 keeping different cadence semantics; `scan_all` consults neither intervals nor
 jitter. Both entry points skip sources whose circuit breaker is still tripped.
+A third, independent maintenance tick calls `engine.prune()` on the
+`MAINTENANCE_INTERVAL_SECONDS` cadence to apply the retention windows, sharing
+the same lock so it never races a scan or a digest flush. The token-protected
+`POST /api/prune` endpoint calls the same `engine.prune()` primitive.
 
 ## Constraints and risks
 

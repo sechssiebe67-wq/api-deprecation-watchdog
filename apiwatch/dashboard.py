@@ -106,6 +106,12 @@ def render_dashboard(
             return "\u2013"
         return "+%d / -%d" % (extras, suppressed)
 
+    def _retention_label(source: Source) -> str:
+        """A compact ``Nd`` window, or an en-dash when the source is unset."""
+        if source.retention_days:
+            return "%dd" % source.retention_days
+        return "\u2013"
+
     def _health_cell(source: Source) -> str:
         """Render the breaker health without ever exposing headers/credentials.
 
@@ -144,7 +150,7 @@ def render_dashboard(
             "<tr><td>%s</td><td><code>%s</code></td><td class=\"col-hide\">%s</td>"
             "<td class=\"col-hide\">%s</td><td>%s</td><td>%s</td><td>%s</td>"
             "<td class=\"col-hide muted\">%s</td><td class=\"col-hide\">%s</td>"
-            "<td class=\"col-hide muted\">%s</td>"
+            "<td class=\"col-hide muted\">%s</td><td class=\"col-hide muted\">%s</td>"
             "<td>%s</td><td>%s</td>"
             "<td><a href=\"/api/sources/%s/entries\">History</a></td></tr>"
             % (
@@ -158,6 +164,7 @@ def render_dashboard(
                 _esc(_truncate(source.notify_webhook_url) if source.notify_webhook_url else "\u2013"),
                 _esc(_auth_indicator(source)),
                 _esc(_keyword_indicator(source)),
+                _esc(_retention_label(source)),
                 _health_cell(source),
                 _esc("enabled" if source.enabled else "disabled"),
                 _esc(source.id),
@@ -165,7 +172,7 @@ def render_dashboard(
             for source in sources
         )
     else:
-        source_rows = '<tr><td colspan="13" class="muted">No sources registered yet.</td></tr>'
+        source_rows = '<tr><td colspan="14" class="muted">No sources registered yet.</td></tr>'
 
     if alerts:
         alert_rows = ""
@@ -243,10 +250,10 @@ def render_dashboard(
   </table>
   <h2>Monitored sources</h2>
   <table>
-    <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Interval</th><th>Min severity</th><th>Channels</th><th class="col-hide">Webhook</th><th class="col-hide">Auth</th><th class="col-hide">Keywords</th><th>Health</th><th>Status</th><th>History</th></tr></thead>
+    <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Interval</th><th>Min severity</th><th>Channels</th><th class="col-hide">Webhook</th><th class="col-hide">Auth</th><th class="col-hide">Keywords</th><th class="col-hide">Retention</th><th>Health</th><th>Status</th><th>History</th></tr></thead>
     <tbody>%s</tbody>
   </table>
-  <p class="muted">JSON API: <code>/api/sources</code>, <code>/api/sources/:id/entries</code>, <code>/api/sources/:id/reset</code> (POST), <code>/api/alerts</code>, <code>/api/entries</code>, <code>/api/digests</code>, <code>/api/stats</code>, <code>/api/export</code>, <code>/api/check</code> (POST), <code>/api/digest/flush</code> (POST).</p>
+  <p class="muted">JSON API: <code>/api/sources</code>, <code>/api/sources/:id/entries</code>, <code>/api/sources/:id/reset</code> (POST), <code>/api/alerts</code>, <code>/api/entries</code>, <code>/api/digests</code>, <code>/api/stats</code>, <code>/api/export</code>, <code>/api/check</code> (POST), <code>/api/prune</code> (POST), <code>/api/digest/flush</code> (POST).</p>
 </main>
 </body>
 </html>

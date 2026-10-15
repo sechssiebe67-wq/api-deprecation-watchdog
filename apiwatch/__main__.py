@@ -61,6 +61,7 @@ def build_app(config: Config = None):
         breaker_threshold=config.breaker_threshold,
         breaker_cooldown_seconds=config.breaker_cooldown_seconds,
         fetch_max_bytes=config.fetch_max_bytes,
+        retention_days=config.retention_days,
     )
     server = create_server(store, engine, config)
     return config, store, engine, server
@@ -80,6 +81,7 @@ def main() -> None:
             engine,
             interval_seconds=config.poll_interval_seconds,
             digest_interval_seconds=digest_interval,
+            maintenance_interval_seconds=config.maintenance_interval_seconds,
         )
         scheduler.start()
     logging.getLogger("apiwatch").info(

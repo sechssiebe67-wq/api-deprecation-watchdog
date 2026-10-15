@@ -178,6 +178,15 @@ def validate_source_payload(
             or max_bytes <= 0
         ):
             raise ApiError(400, "'max_bytes' must be a positive integer")
+    retention_days = payload.get("retention_days")
+    if retention_days is not None:
+        # ``bool`` is an ``int`` subclass but is not a meaningful window.
+        if (
+            isinstance(retention_days, bool)
+            or not isinstance(retention_days, int)
+            or retention_days <= 0
+        ):
+            raise ApiError(400, "'retention_days' must be a positive integer")
     headers = payload.get("headers")
     if headers is None:
         headers = {}
@@ -219,6 +228,7 @@ def validate_source_payload(
         scan_interval_seconds=scan_interval,
         scan_jitter_seconds=scan_jitter,
         max_bytes=max_bytes,
+        retention_days=retention_days,
         headers=normalized_headers,
         auth=auth,
         extra_keywords=extra_keywords,
@@ -375,6 +385,9 @@ class WatchdogHandler(BaseHTTPRequestHandler):
         if method == "POST" and path == "/api/check":
             self._run_check()
             return
+        if method == "POST" and path == "/api/prune":
+            self._prune()
+            return
         if path.startswith("/api/digests/"):
             digest_id = _parse_id(path.rsplit("/", 1)[-1])
             if method == "GET":
@@ -498,6 +511,18 @@ class WatchdogHandler(BaseHTTPRequestHandler):
             raise ApiError(401, "unauthorized")
         digest = self.engine.flush_digest()
         self._send_json(200, {"digest": digest.to_dict() if digest else None})
+
+    def _prune(self) -> None:
+        if not self._authorized():
+            raise ApiError(401, "unauthorized")
+        counts = self.engine.prune()
+        self._send_json(
+            200,
+            {
+                "entries_pruned": counts.get("entries_pruned", 0),
+                "alerts_pruned": counts.get("alerts_pruned", 0),
+            },
+        )
 
 
 def _parse_id(value: str) -> int:

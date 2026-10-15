@@ -8,7 +8,7 @@ import json
 import os
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from .models import Alert, Digest, Entry, Source
@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS sources (
     scan_interval_seconds INTEGER,
     scan_jitter_seconds INTEGER,
     max_bytes INTEGER,
+    retention_days INTEGER,
     headers TEXT,
     auth TEXT,
     extra_keywords TEXT NOT NULL DEFAULT '[]',
@@ -171,6 +172,11 @@ class Store:
                 "ALTER TABLE sources ADD COLUMN truncated "
                 "INTEGER NOT NULL DEFAULT 0"
             )
+        if "retention_days" not in source_columns:
+            # Old rows keep ``NULL`` so they inherit the global ``RETENTION_DAYS``.
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN retention_days INTEGER"
+            )
 
         alert_columns = {
             row["name"]
@@ -204,10 +210,10 @@ class Store:
                    (name, url, kind, api_name, tracked_versions, enabled, selector,
                     min_severity, notify_channels, notify_webhook_url,
                     scan_interval_seconds, scan_jitter_seconds, max_bytes,
-                    headers, auth,
+                    retention_days, headers, auth,
                     extra_keywords, suppress_keywords, failure_count,
                     breaker_until, truncated, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -222,6 +228,7 @@ class Store:
                     source.scan_interval_seconds,
                     source.scan_jitter_seconds,
                     source.max_bytes,
+                    source.retention_days,
                     json.dumps(source.headers or {}),
                     source.auth,
                     json.dumps(source.extra_keywords or []),
@@ -349,6 +356,68 @@ class Store:
                 (source_id, limit),
             ).fetchall()
         return [_row_to_entry(row) for row in rows]
+
+    def prune_entries(
+        self,
+        retention_days: int = 0,
+        source_overrides: Optional[dict] = None,
+        now: Optional[datetime] = None,
+    ) -> dict:
+        """Delete entries older than the effective retention window per source.
+
+        The window for a source is, in order of precedence, an explicit
+        ``source_overrides[source_id]`` value, the source's own stored
+        ``retention_days``, or the global ``retention_days`` argument. A window
+        of ``None`` or ``0`` disables pruning for that source. Alerts whose
+        ``entry_id`` was pruned are removed with their entry; ``sources`` and
+        ``digests`` are never touched, so the registry and the aggregate history
+        survive a prune. Returns ``{"entries_pruned": N, "alerts_pruned": M}``.
+        """
+        overrides = source_overrides or {}
+        moment = now or datetime.now(timezone.utc)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        moment = moment.astimezone(timezone.utc)
+        entries_pruned = 0
+        alerts_pruned = 0
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, retention_days FROM sources"
+            ).fetchall()
+            for row in rows:
+                source_id = row["id"]
+                if source_id in overrides:
+                    window = overrides[source_id]
+                elif row["retention_days"] is not None:
+                    window = row["retention_days"]
+                else:
+                    window = retention_days
+                if not window or window <= 0:
+                    continue
+                cutoff = (moment - timedelta(days=window)).isoformat(
+                    timespec="seconds"
+                )
+                stale = [
+                    entry["id"]
+                    for entry in self._conn.execute(
+                        "SELECT id FROM entries WHERE source_id = ? AND created_at < ?",
+                        (source_id, cutoff),
+                    ).fetchall()
+                ]
+                if not stale:
+                    continue
+                placeholders = ",".join("?" for _ in stale)
+                cur = self._conn.execute(
+                    "DELETE FROM entries WHERE id IN (%s)" % placeholders, stale
+                )
+                entries_pruned += cur.rowcount
+                acur = self._conn.execute(
+                    "DELETE FROM alerts WHERE entry_id IN (%s)" % placeholders,
+                    stale,
+                )
+                alerts_pruned += acur.rowcount
+            self._conn.commit()
+        return {"entries_pruned": entries_pruned, "alerts_pruned": alerts_pruned}
 
     # -- alerts ------------------------------------------------------------ #
     def create_alert(self, alert: Alert) -> Optional[Alert]:
@@ -572,6 +641,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         scan_interval_seconds=row["scan_interval_seconds"],
         scan_jitter_seconds=row["scan_jitter_seconds"],
         max_bytes=row["max_bytes"],
+        retention_days=row["retention_days"],
         headers=json.loads(row["headers"] or "{}"),
         auth=row["auth"],
         extra_keywords=json.loads(row["extra_keywords"] or "[]"),
