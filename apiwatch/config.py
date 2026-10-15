@@ -14,6 +14,8 @@ log = logging.getLogger("apiwatch.config")
 
 DIGEST_MODES = ("off", "digest", "both")
 DIGEST_INTERVAL_MIN_SECONDS = 300
+BREAKER_THRESHOLD_MIN = 1
+BREAKER_COOLDOWN_MIN_SECONDS = 60
 
 
 def _bool(value: Optional[str], default: bool = False) -> bool:
@@ -68,6 +70,8 @@ class Config:
     digest_mode: str = "off"
     digest_interval_seconds: int = 86400
     digest_max_alerts: int = 50
+    breaker_threshold: int = 5
+    breaker_cooldown_seconds: int = 1800
 
     @property
     def db_path(self) -> str:
@@ -106,4 +110,12 @@ class Config:
                 int(env.get("DIGEST_INTERVAL_SECONDS") or 86400),
             ),
             digest_max_alerts=max(1, int(env.get("DIGEST_MAX_ALERTS") or 50)),
+            breaker_threshold=max(
+                BREAKER_THRESHOLD_MIN,
+                int(env.get("BREAKER_THRESHOLD") or 5),
+            ),
+            breaker_cooldown_seconds=max(
+                BREAKER_COOLDOWN_MIN_SECONDS,
+                int(env.get("BREAKER_COOLDOWN_SECONDS") or 1800),
+            ),
         )

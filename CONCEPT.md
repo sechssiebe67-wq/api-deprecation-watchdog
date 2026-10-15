@@ -121,14 +121,29 @@ heterogeneous noise into a single prioritized alert stream.
   changelogs behind HTTP Basic auth without forking the service. Header names are
   normalized case-insensitively to a canonical `Title-Case` form so
   `user-agent` and `User-Agent` cannot both be stored; the last write wins.
-  A source with neither field behaves exactly as before. The dashboard shows a
-  compact lock / header-count indicator and never renders a header value or the
-  credentials.
+   A source with neither field behaves exactly as before. The dashboard shows a
+   compact lock / header-count indicator and never renders a header value or the
+   credentials.
+- **Per-source failure circuit breaker:** every source tracks a
+  `failure_count` (consecutive failed scans) and an optional `breaker_until`
+  (ISO-8601 UTC). A failed fetch — or a malformed OpenAPI document — increments
+  the counter; once it reaches `BREAKER_THRESHOLD` (default `5`) the source is
+  quarantined and `breaker_until` is set to `now + BREAKER_COOLDOWN_SECONDS`
+  (default `1800`, minimum `60`). While tripped, the background scheduler and
+  `Engine.scan_all()` skip the source and report it as *skipped* rather than
+  failed, so a slow or hostile feed cannot starve the poll loop or be retried on
+  every tick. A single successful scan resets `failure_count` to `0` and clears
+  `breaker_until`, so the source is scanned again on the next tick; operators
+  can also clear it immediately through `POST /api/sources/:id/reset`. The two
+  fields are returned by `GET /api/sources` and `GET /api/sources/:id` and
+  summarised by `sources_tripped` in `GET /api/stats`.
 - **Persistence:** SQLite store with de-duplication by content hash, so the same
   announcement is only alerted once. The source table stores
-  `scan_interval_seconds`, `headers` (JSON text) and `auth` (text), and a
+  `scan_interval_seconds`, `headers` (JSON text), `auth` (text),
+  `failure_count` (integer, default `0`) and `breaker_until` (text), and a
   lightweight migration adds each column to databases created before it existed,
-  leaving old rows at `NULL`/empty (read back as `{}` / `None`).
+  leaving old rows at `NULL`/empty/`0` (read back as `{}` / `None` / `0` /
+  `None`).
 - **Per-source history API:** each source's recorded entries are browsable
   newest-first through `GET /api/sources/:id/entries` (optional `?limit=`,
   default `100`), so the stored history of one dependency can be inspected
@@ -188,9 +203,11 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `headers`, `auth`) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `headers`, `auth`, `failure_count`, `breaker_until`) |
 | POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `headers` and `auth` (token protected) |
+| GET    | `/api/sources/:id`| Fetch one source (incl. breaker fields)   |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
+| POST   | `/api/sources/:id/reset` | Clear one source's `failure_count` and `breaker_until` (token protected) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
 | GET    | `/api/alerts`     | List alerts, newest first                 |
 | GET    | `/api/entries`    | List parsed changelog entries             |
@@ -198,7 +215,7 @@ heterogeneous noise into a single prioritized alert stream.
 | GET    | `/api/digests/:id`| Fetch one digest (`404` when unknown)     |
 | POST   | `/api/digest/flush`| Build and deliver a digest (token protected) |
 | POST   | `/api/check`      | Run a scan now (token protected)          |
-| GET    | `/api/stats`      | Aggregate counters                        |
+| GET    | `/api/stats`      | Aggregate counters (incl. `sources_tripped`) |
 
 ## Selector syntax
 
@@ -246,8 +263,41 @@ in-memory last-scan timestamp per source and only scans a source when its
 effective interval has elapsed; it wakes at the smallest effective interval so a
 15-minute source is still honoured when `POLL_INTERVAL_SECONDS` is an hour. The
 first tick after start scans every source. `POST /api/check` (and the engine's
-`scan_all()`) always scans every enabled source regardless of the field, so a
-manual check is never filtered by cadence.
+`scan_all()`) always scans every healthy enabled source regardless of the field
+(sources with a tripped circuit breaker are skipped, see *Circuit breaker*), so
+a manual check is never filtered by cadence.
+
+## Circuit breaker
+
+Every source records its consecutive failed scans in `failure_count` and, once
+it has failed too many times in a row, a `breaker_until` timestamp. The
+semantics are:
+
+- A scan that raises a `FetchError` (network error, non-`2xx` response, timeout,
+  DNS failure) or that yields a malformed OpenAPI document increments
+  `failure_count`. A malformed document is a parse failure, not a silent no-op.
+- When `failure_count` reaches `BREAKER_THRESHOLD` (default `5`, minimum `1`)
+  the source is *tripped*: `breaker_until` is set to
+  `now + BREAKER_COOLDOWN_SECONDS` (default `1800`, minimum `60`) and the scan
+  result records the trip once.
+- While `breaker_until` is in the future the source is quarantined. The
+  background scheduler excludes it from the scan set and does not let its
+  (potentially long) remaining cooldown delay the wake-up for healthy sources;
+  `Engine.scan_all()` — used by `POST /api/check` — also skips it and reports it
+  under `sources_skipped` instead of `sources_failed`. A manual check therefore
+  covers every *healthy* enabled source without hammering a quarantined one.
+- A single successful fetch and parse resets `failure_count` to `0` and clears
+  `breaker_until`, so the source is scanned again on the next tick. An operator
+  can force the same reset at any time with the token-protected
+  `POST /api/sources/:id/reset` endpoint, which returns the updated source and
+  `404` for an unknown id.
+
+The breaker state is part of the source JSON: `failure_count` (integer) and
+`breaker_until` (ISO-8601 UTC or `null`). `GET /api/stats` adds
+`sources_tripped`, the number of sources whose `breaker_until` is still in the
+future. The dashboard renders a `Health` column (`ok`, `N failures` or
+`tripped until <time>`) and offers a `Reset` action for tripped sources without
+ever exposing header values or credentials.
 
 ## Routing
 
@@ -437,6 +487,14 @@ field on each source, merged over the default request headers with an
 otherwise gated feeds (private GitHub Enterprise/GitLab, token-gated
 statuspages, internal changelogs) can be monitored without forking the service.
 
+*Shipped:* **per-source failure circuit breaker** (see *Current capabilities*) —
+`failure_count` and `breaker_until` on each source, a `BREAKER_THRESHOLD` /
+`BREAKER_COOLDOWN_SECONDS` policy, skip-rather-than-retry semantics in the
+scheduler and `Engine.scan_all()`, a token-protected
+`POST /api/sources/:id/reset`, a `sources_tripped` stat and a dashboard
+`Health` column, so one flaky or hostile dependency can no longer starve the
+shared poll loop.
+
 1. **More source adapters:** additional structured feeds beyond the shipped
    GitHub and GitLab releases and OpenAPI adapters. *Partially shipped:*
    the `gitlab` adapter now covers GitLab-hosted releases; further forges and
@@ -479,7 +537,8 @@ per source, computes each source's effective interval (`scan_interval_seconds`
 or `POLL_INTERVAL_SECONDS`) and calls `engine.scan_sources` only for the sources
 that are due. `engine.scan_all` remains the "scan everything now" primitive used
 by the manual check endpoint, so the two entry points share one scanning
-implementation while keeping different cadence semantics.
+implementation while keeping different cadence semantics. Both entry points skip
+sources whose circuit breaker is still tripped.
 
 ## Constraints and risks
 

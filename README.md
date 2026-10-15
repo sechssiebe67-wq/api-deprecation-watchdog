@@ -53,6 +53,12 @@ actually use.
   GitLab instances, token-gated statuspages and internal changelogs. Header
   names are normalized case-insensitively (`user-agent` == `User-Agent`); the
   dashboard shows only a lock/header-count indicator, never the secret values.
+- **Per-source failure circuit breaker**: each source tracks `failure_count`
+  (consecutive failed scans) and `breaker_until`. After `BREAKER_THRESHOLD`
+  failures a source is quarantined for `BREAKER_COOLDOWN_SECONDS`, so a flaky or
+  hostile feed is skipped (reported as `sources_skipped`) instead of retried on
+  every tick. A successful scan — or a call to `POST /api/sources/:id/reset` —
+  clears the counter and breaker.
 - **SQLite history** with content-hash de-duplication (no repeated alerts).
 - **Notifications** via Slack webhook, SMTP e-mail, a generic JSON webhook and
   console.
@@ -68,7 +74,8 @@ actually use.
   ordered summary on a configurable cadence (`off`, `digest` or `both`).
 - **Web dashboard** with an `Interval` column showing each source's cadence (or
   the global default), an `Auth` column showing a lock/header-count indicator
-  (never the secret values) and a JSON API.
+  (never the secret values), a `Health` column (`ok`, `N failures` or
+  `tripped until <time>` with a `Reset` action) and a JSON API.
 - **Operations-ready**: `GET /healthz`, background poller, non-root container,
   Helm chart, `linux/amd64` + `linux/arm64` image.
 
@@ -101,6 +108,8 @@ All configuration is environment based:
 | `DATA_DIR`               | `/data` | Directory for `watchdog.db` (SQLite)                |
 | `POLL_INTERVAL_SECONDS`  | `3600`  | Global background scan interval; per-source `scan_interval_seconds` overrides it |
 | `FETCH_TIMEOUT_SECONDS`  | `20`    | Per-source HTTP timeout                             |
+| `BREAKER_THRESHOLD`      | `5`     | Consecutive scan failures before a source is tripped (minimum `1`) |
+| `BREAKER_COOLDOWN_SECONDS` | `1800` | Quarantine window after tripping a source (minimum `60`) |
 | `DISABLE_SCHEDULER`      | `false` | Disable background polling                          |
 | `SEED_SOURCES`           | `true`  | Seed default sources on first start                 |
 | `NOTIFY_CHANNELS`        | `all`   | Default routing for sources that omit `notify_channels`; comma-separated `console`, `slack`, `email` or `all` |
@@ -122,16 +131,17 @@ All configuration is environment based:
 | ------ | ------------------ | ----------------------------------------- |
 | GET    | `/healthz`         | Liveness / readiness probe                |
 | GET    | `/`                | HTML dashboard                            |
-| GET    | `/api/sources`     | List monitored sources                    |
+| GET    | `/api/sources`     | List monitored sources (incl. `failure_count`, `breaker_until`) |
 | POST   | `/api/sources`     | Register a source (token protected)       |
-| GET    | `/api/sources/:id` | Fetch one source                          |
+| GET    | `/api/sources/:id` | Fetch one source (incl. `failure_count`, `breaker_until`) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
+| POST   | `/api/sources/:id/reset` | Clear one source's breaker state (token protected) |
 | DELETE | `/api/sources/:id` | Remove a source (token protected)         |
 | GET    | `/api/alerts`      | List alerts (`?limit=`, `?severity=`)     |
 | GET    | `/api/entries`     | List parsed entries (`?source_id=`)       |
 | GET    | `/api/digests`     | List digests, newest first (`?limit=`)    |
 | GET    | `/api/digests/:id` | Fetch one digest (`404` when unknown)     |
-| GET    | `/api/stats`       | Aggregate counters                        |
+| GET    | `/api/stats`       | Aggregate counters (incl. `sources_tripped`) |
 | POST   | `/api/check`       | Run a scan now (token protected)          |
 | POST   | `/api/digest/flush`| Build and deliver a digest (token protected) |
 
@@ -387,6 +397,45 @@ curl -X POST http://localhost:8080/api/sources \
        "kind":"gitlab","api_name":"Widget","auth":"bot:glpat-secret"}'
 ```
 
+## Failure circuit breaker
+
+A single slow or permanently broken source must not starve the shared poll loop.
+Every source therefore records two extra fields, returned by `GET /api/sources`
+and `GET /api/sources/:id`:
+
+| Field            | Meaning                                                       |
+| ---------------- | ------------------------------------------------------------- |
+| `failure_count`  | Number of consecutive failed scans (integer, default `0`)     |
+| `breaker_until`  | ISO-8601 UTC timestamp until which the source is quarantined, or `null` |
+
+A scan is a *failure* when the fetch raises a `FetchError` (network error,
+non-`2xx` response, timeout) or when an `openapi` document cannot be parsed. Each
+failure increments `failure_count`; once it reaches `BREAKER_THRESHOLD` (default
+`5`, minimum `1`) the source is *tripped* and `breaker_until` is set to
+`now + BREAKER_COOLDOWN_SECONDS` (default `1800`, minimum `60`). While tripped:
+
+- the background scheduler excludes the source and does not let its remaining
+  cooldown delay the wake-up for healthy sources;
+- `POST /api/check` (`Engine.scan_all()`) skips it and reports it under
+  `sources_skipped` rather than `sources_failed`, so a manual check still covers
+  every healthy enabled source;
+- `GET /api/stats` counts it in `sources_tripped`.
+
+A single successful fetch and parse resets `failure_count` to `0` and clears
+`breaker_until`, so the source is scanned again on the next tick. Operators can
+force the same reset immediately:
+
+```sh
+# Clear a source's failure count and breaker (token protected when API_TOKEN is set).
+curl -X POST http://localhost:8080/api/sources/1/reset \
+  -H "Authorization: Bearer $API_TOKEN"
+# -> the updated source, or 404 {"error": "source not found"} for an unknown id
+```
+
+The dashboard shows a `Health` column — `ok`, `N failures` or
+`tripped until <time>` — with a `Reset` button for tripped sources. It never
+renders header values or credentials.
+
 ## Digest notifications
 
 By default (`DIGEST_MODE=off`) every scan that finds new relevant entries sends
@@ -425,7 +474,9 @@ image as `image.repository@image.digest` for immutable releases, supports
 ingress through `ingress.enabled`, `ingress.host` and `ingress.className`,
 runs as a non-root user with a read-only root filesystem, and persists SQLite
 data on a PVC. Digest mode is configured through `config.digestMode`,
-`config.digestIntervalSeconds` and `config.digestMaxAlerts` in `values.yaml`.
+`config.digestIntervalSeconds` and `config.digestMaxAlerts` in `values.yaml`;
+the circuit breaker through `config.breakerThreshold` and
+`config.breakerCooldownSeconds`.
 
 ```sh
 helm install watchdog deploy/helm/api-deprecation-watchdog \

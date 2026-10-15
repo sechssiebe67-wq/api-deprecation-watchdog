@@ -86,6 +86,10 @@ config:
   digestMode: "off"
   digestIntervalSeconds: 86400
   digestMaxAlerts: 50
+  # Circuit breaker: quarantine a source after this many consecutive failures
+  # for this many seconds.
+  breakerThreshold: 5
+  breakerCooldownSeconds: 1800
 
 # Optional plain-text environment values.
 extraEnv: []

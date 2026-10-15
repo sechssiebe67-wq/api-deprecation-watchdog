@@ -338,6 +338,14 @@ class WatchdogHandler(BaseHTTPRequestHandler):
             entries = self.store.list_entries_for_source(source_id, limit)
             self._send_json(200, {"entries": [e.to_dict() for e in entries]})
             return
+        if path.startswith("/api/sources/") and path.endswith("/reset"):
+            source_id = _parse_id(
+                path[len("/api/sources/"): -len("/reset")].rstrip("/")
+            )
+            if method != "POST":
+                raise ApiError(404, "not found")
+            self._reset_source(source_id)
+            return
         if path.startswith("/api/sources/"):
             source_id = _parse_id(path.rsplit("/", 1)[-1])
             if method == "DELETE":
@@ -383,6 +391,14 @@ class WatchdogHandler(BaseHTTPRequestHandler):
         if not self.store.delete_source(source_id):
             raise ApiError(404, "source not found")
         self._send_json(200, {"deleted": source_id})
+
+    def _reset_source(self, source_id: int) -> None:
+        if not self._authorized():
+            raise ApiError(401, "unauthorized")
+        if self.store.get_source(source_id) is None:
+            raise ApiError(404, "source not found")
+        self.store.record_source_success(source_id)
+        self._send_json(200, self.store.get_source(source_id).to_dict())
 
     def _list_alerts(self, query: dict) -> None:
         limit = _int_param(query, "limit", 100)

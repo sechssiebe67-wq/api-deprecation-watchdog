@@ -71,6 +71,9 @@ class Scheduler:
         now = self._clock() if now is None else now
         due = []
         for source in self.engine.store.list_sources(enabled_only=True):
+            if self.engine.is_tripped(source):
+                # A quarantined source is not scanned until its breaker expires.
+                continue
             last = self._last_scan.get(source.id)
             if last is None or now - last >= self.effective_interval(source):
                 due.append(source)
@@ -87,9 +90,15 @@ class Scheduler:
         return result
 
     def _sleep_seconds(self) -> float:
-        """Wake often enough to honour the smallest enabled effective interval."""
+        """Wake often enough to honour the smallest enabled effective interval.
+
+        Tripped sources are ignored: their (potentially long) remaining cooldown
+        must not stop the loop from waking for the healthy sources.
+        """
         intervals = [self.interval]
         for source in self.engine.store.list_sources(enabled_only=True):
+            if self.engine.is_tripped(source):
+                continue
             intervals.append(self.effective_interval(source))
         return min(intervals)
 
