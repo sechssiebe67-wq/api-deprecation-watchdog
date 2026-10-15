@@ -308,5 +308,290 @@ class HtmlParserTests(unittest.TestCase):
         self.assertEqual(parsers.parse("xml", "<x/>"), [])
 
 
+def _spec(paths, *, version="1.0.0", contact="/support"):
+    return {
+        "openapi": "3.0.0",
+        "info": {"title": "Acme", "version": version, "contact": {"url": contact}},
+        "paths": paths,
+    }
+
+
+def _op(parameters=None, responses=None, **extra):
+    operation = {"responses": responses or {"200": {"description": "ok"}}}
+    if parameters is not None:
+        operation["parameters"] = parameters
+    operation.update(extra)
+    return operation
+
+
+OPENAPI_V1 = _spec(
+    {
+        "/users": {
+            "get": _op(
+                parameters=[{"name": "limit", "in": "query", "schema": {"type": "integer"}}],
+                responses={
+                    "200": {"description": "ok"},
+                    "404": {"description": "not found"},
+                },
+            ),
+            "post": _op(responses={"201": {"description": "created"}}),
+        },
+        "/legacy": {"get": _op()},
+    },
+    version="1.0.0",
+)
+
+OPENAPI_V2 = _spec(
+    {
+        "/users": {
+            "get": _op(
+                parameters=[
+                    {"name": "limit", "in": "query", "schema": {"type": "integer"}},
+                    {"name": "org", "in": "query", "required": True, "schema": {"type": "string"}},
+                ],
+                responses={"200": {"description": "ok"}},
+            ),
+            "post": _op(responses={"201": {"description": "created"}}),
+        },
+        "/teams": {"get": _op()},
+    },
+    version="2.0.0",
+)
+
+
+class OpenApiChangesTests(unittest.TestCase):
+    def _kinds(self, old, new):
+        return [change["kind"] for change in parsers._openapi_changes(old, new)]
+
+    def _one(self, old, new, kind):
+        changes = [c for c in parsers._openapi_changes(old, new) if c["kind"] == kind]
+        self.assertEqual(len(changes), 1, "expected exactly one %r in %r" % (kind, changes))
+        return changes[0]
+
+    def test_removed_path_is_critical(self):
+        old = _spec({"/users": {"get": _op()}})
+        new = _spec({})
+        change = self._one(old, new, "removed path")
+        self.assertEqual(change["severity"], "critical")
+        self.assertEqual(change["path"], "/users")
+
+    def test_added_path_is_info(self):
+        old = _spec({})
+        new = _spec({"/users": {"get": _op()}})
+        change = self._one(old, new, "added path")
+        self.assertEqual(change["severity"], "info")
+
+    def test_removed_operation_is_critical(self):
+        old = _spec({"/users": {"get": _op(), "delete": _op()}})
+        new = _spec({"/users": {"get": _op()}})
+        change = self._one(old, new, "removed operation")
+        self.assertEqual(change["severity"], "critical")
+        self.assertEqual(change["method"], "DELETE")
+
+    def test_removed_required_parameter_is_critical(self):
+        old = _spec({"/users": {"get": _op(parameters=[
+            {"name": "org", "in": "query", "required": True, "schema": {"type": "string"}}
+        ])}})
+        new = _spec({"/users": {"get": _op(parameters=[])}})
+        change = self._one(old, new, "removed required parameter")
+        self.assertEqual(change["severity"], "critical")
+
+    def test_removed_enum_value_is_critical(self):
+        old = _spec({"/users": {"get": _op(parameters=[
+            {"name": "state", "in": "query", "schema": {"type": "string", "enum": ["a", "b"]}}
+        ])}})
+        new = _spec({"/users": {"get": _op(parameters=[
+            {"name": "state", "in": "query", "schema": {"type": "string", "enum": ["a"]}}
+        ])}})
+        change = self._one(old, new, "removed enum value")
+        self.assertEqual(change["severity"], "critical")
+
+    def test_changed_parameter_location_is_critical(self):
+        old = _spec({"/users": {"get": _op(parameters=[
+            {"name": "token", "in": "query", "schema": {"type": "string"}}
+        ])}})
+        new = _spec({"/users": {"get": _op(parameters=[
+            {"name": "token", "in": "header", "schema": {"type": "string"}}
+        ])}})
+        change = self._one(old, new, "changed parameter location")
+        self.assertEqual(change["severity"], "critical")
+
+    def test_changed_response_status_code_set_is_critical(self):
+        old = _spec({"/users": {"get": _op(responses={"200": {"description": "ok"},
+                                                       "404": {"description": "nope"}})}})
+        new = _spec({"/users": {"get": _op(responses={"200": {"description": "ok"}})}})
+        change = self._one(old, new, "changed response status code set")
+        self.assertEqual(change["severity"], "critical")
+
+    def test_added_required_parameter_is_warning(self):
+        old = _spec({"/users": {"get": _op(parameters=[])}})
+        new = _spec({"/users": {"get": _op(parameters=[
+            {"name": "org", "in": "query", "required": True, "schema": {"type": "string"}}
+        ])}})
+        change = self._one(old, new, "added required parameter")
+        self.assertEqual(change["severity"], "warning")
+
+    def test_added_optional_parameter_is_info(self):
+        old = _spec({"/users": {"get": _op(parameters=[])}})
+        new = _spec({"/users": {"get": _op(parameters=[
+            {"name": "limit", "in": "query", "schema": {"type": "integer"}}
+        ])}})
+        change = self._one(old, new, "added optional parameter")
+        self.assertEqual(change["severity"], "info")
+
+    def test_added_enum_value_is_info(self):
+        old = _spec({"/users": {"get": _op(parameters=[
+            {"name": "state", "in": "query", "schema": {"type": "string", "enum": ["a"]}}
+        ])}})
+        new = _spec({"/users": {"get": _op(parameters=[
+            {"name": "state", "in": "query", "schema": {"type": "string", "enum": ["a", "b"]}}
+        ])}})
+        change = self._one(old, new, "added enum value")
+        self.assertEqual(change["severity"], "info")
+
+    def test_narrowed_enum_in_schema_is_warning(self):
+        old = _spec({"/users": {"get": _op(requestBody={"content": {"application/json": {
+            "schema": {"type": "object", "properties": {
+                "state": {"type": "string", "enum": ["a", "b"]}
+            }}
+        }}})}})
+        new = _spec({"/users": {"get": _op(requestBody={"content": {"application/json": {
+            "schema": {"type": "object", "properties": {
+                "state": {"type": "string", "enum": ["a"]}
+            }}
+        }}})}})
+        change = self._one(old, new, "narrowed enum")
+        self.assertEqual(change["severity"], "warning")
+
+    def test_changed_parameter_type_is_warning(self):
+        old = _spec({"/users": {"get": _op(parameters=[
+            {"name": "limit", "in": "query", "schema": {"type": "integer"}}
+        ])}})
+        new = _spec({"/users": {"get": _op(parameters=[
+            {"name": "limit", "in": "query", "schema": {"type": "string"}}
+        ])}})
+        change = self._one(old, new, "changed parameter type")
+        self.assertEqual(change["severity"], "warning")
+
+    def test_changed_request_schema_type_is_warning(self):
+        old = _spec({"/users": {"post": _op(requestBody={"content": {"application/json": {
+            "schema": {"type": "object"}
+        }}})}})
+        new = _spec({"/users": {"post": _op(requestBody={"content": {"application/json": {
+            "schema": {"type": "string"}
+        }}})}})
+        change = self._one(old, new, "changed request schema type")
+        self.assertEqual(change["severity"], "warning")
+
+    def test_changed_response_schema_type_is_warning(self):
+        old = _spec({"/users": {"get": _op(responses={"200": {"content": {"application/json": {
+            "schema": {"type": "object"}
+        }}}})}})
+        new = _spec({"/users": {"get": _op(responses={"200": {"content": {"application/json": {
+            "schema": {"type": "string"}
+        }}}})}})
+        change = self._one(old, new, "changed response schema type")
+        self.assertEqual(change["severity"], "warning")
+
+    def test_changed_required_property_is_warning(self):
+        old = _spec({"/users": {"post": _op(requestBody={"content": {"application/json": {
+            "schema": {"type": "object", "required": ["name"], "properties": {
+                "name": {"type": "string"}, "org": {"type": "string"}
+            }}
+        }}})}})
+        new = _spec({"/users": {"post": _op(requestBody={"content": {"application/json": {
+            "schema": {"type": "object", "required": ["name", "org"], "properties": {
+                "name": {"type": "string"}, "org": {"type": "string"}
+            }}
+        }}})}})
+        change = self._one(old, new, "changed required property")
+        self.assertEqual(change["severity"], "warning")
+
+    def test_added_response_status_code_is_info(self):
+        old = _spec({"/users": {"get": _op(responses={"200": {"description": "ok"}})}})
+        new = _spec({"/users": {"get": _op(responses={"200": {"description": "ok"},
+                                                       "404": {"description": "nope"}})}})
+        change = self._one(old, new, "added response status code")
+        self.assertEqual(change["severity"], "info")
+
+    def test_changed_description_is_info(self):
+        old = _spec({"/users": {"get": _op(description="List users")}})
+        new = _spec({"/users": {"get": _op(description="List all users")}})
+        change = self._one(old, new, "changed description")
+        self.assertEqual(change["severity"], "info")
+
+    def test_noop_diff_is_empty(self):
+        self.assertEqual(parsers._openapi_changes(OPENAPI_V1, OPENAPI_V1), [])
+
+    def test_whitespace_only_description_change_is_ignored(self):
+        old = _spec({"/users": {"get": _op(description="List   users")}})
+        new = _spec({"/users": {"get": _op(description="List users")}})
+        self.assertEqual(parsers._openapi_changes(old, new), [])
+
+    def test_reordered_parameters_are_ignored(self):
+        first = {"name": "a", "in": "query", "schema": {"type": "string"}}
+        second = {"name": "b", "in": "query", "schema": {"type": "string"}}
+        old = _spec({"/users": {"get": _op(parameters=[first, second])}})
+        new = _spec({"/users": {"get": _op(parameters=[second, first])}})
+        self.assertEqual(parsers._openapi_changes(old, new), [])
+
+
+class OpenApiParserTests(unittest.TestCase):
+    def test_two_versions_with_selector(self):
+        text = json.dumps({"versions": [OPENAPI_V1, OPENAPI_V2]})
+        entries = parsers.parse_openapi(
+            text, base_url="https://api.acme.com/openapi.json", selector="versions"
+        )
+        self.assertEqual(
+            [e.title for e in entries],
+            [
+                "/legacy: removed path",
+                "/teams: added path",
+                "GET /users: added required parameter",
+                "GET /users: changed response status code set",
+            ],
+        )
+        self.assertEqual(
+            [e.severity for e in entries],
+            ["critical", "info", "warning", "critical"],
+        )
+        for entry in entries:
+            self.assertTrue(entry.title)
+            self.assertTrue(entry.categories)
+            self.assertIn("old:", entry.body)
+            self.assertIn("new:", entry.body)
+
+        removed = entries[0]
+        self.assertIn("removed path", removed.categories)
+        self.assertIn("/legacy", removed.categories)
+        self.assertEqual(removed.link, "https://api.acme.com/support")
+        self.assertEqual(removed.published, "2.0.0")
+
+    def test_single_spec_without_selector_surfaces_baseline_as_info(self):
+        entries = parsers.parse_openapi(json.dumps(OPENAPI_V1))
+        self.assertEqual(
+            [e.title for e in entries],
+            ["/legacy: added path", "/users: added path"],
+        )
+        self.assertTrue(all(e.severity == "info" for e in entries))
+
+    def test_dispatch(self):
+        text = json.dumps({"versions": [OPENAPI_V1, OPENAPI_V2]})
+        entries = parsers.parse("openapi", text, selector="versions")
+        self.assertEqual(len(entries), 4)
+
+    def test_malformed_returns_empty(self):
+        self.assertEqual(parsers.parse_openapi("not json"), [])
+        self.assertEqual(parsers.parse_openapi(""), [])
+        self.assertEqual(parsers.parse_openapi("   "), [])
+        self.assertEqual(parsers.parse_openapi('{"paths": }'), [])
+        self.assertEqual(parsers.parse("openapi", "not json"), [])
+
+    def test_json_string_wrapper_is_unwrapped(self):
+        wrapped = json.dumps(json.dumps(OPENAPI_V1))
+        entries = parsers.parse_openapi(wrapped)
+        self.assertGreater(len(entries), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

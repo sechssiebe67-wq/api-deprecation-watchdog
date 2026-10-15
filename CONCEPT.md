@@ -28,7 +28,8 @@ heterogeneous noise into a single prioritized alert stream.
 
 - Deprecation-focused detection instead of generic uptime/API monitoring.
 - Rule-based extraction from heterogeneous sources (RSS, HTML, JSON,
-  statuspage.io and GitHub releases), with per-source selectors for precision.
+  statuspage.io, GitHub releases and OpenAPI/Swagger specs), with per-source
+  selectors for precision, plus true schema diffing for OpenAPI.
 - Relevance filtering against the API versions a team actually uses, so the
   signal stays small.
 - Delivery into existing developer workflows; no agent installation required.
@@ -36,22 +37,43 @@ heterogeneous noise into a single prioritized alert stream.
 ## Current capabilities (MVP increment)
 
 - **Source registry:** add, list and remove monitored sources with a kind
-  (`rss`, `html`, `json`, `statuspage`, `github`), an API name, the tracked
-  versions and an optional per-source selector.
+  (`rss`, `html`, `json`, `statuspage`, `github`, `openapi`), an API name, the
+  tracked versions and an optional per-source selector.
 - **Parsers:** built-in parsers for RSS/Atom XML, JSON changelogs (several
   common shapes), HTML changelogs (headings + following content),
-  statuspage.io JSON (`incidents` + `scheduled_maintenances`) and GitHub
-  releases (`releases` + pre-releases via the REST API), all dependency-free.
+  statuspage.io JSON (`incidents` + `scheduled_maintenances`), GitHub
+  releases (`releases` + pre-releases via the REST API) and OpenAPI/Swagger
+  specs (structural diffing), all dependency-free.
   A `github` registration accepts either the API URL
   (`https://api.github.com/repos/owner/repo/releases`) or the repository HTML
   URL (`https://github.com/owner/repo`), which is normalized to the API URL;
   release `name`/`tag_name` becomes the title, `body` the body, `html_url` the
   link, `published_at` the date and `tag_name`/`prerelease` the categories,
   while drafts are skipped.
+- **OpenAPI diff detection:** an `openapi` source fetches a spec URL, walks an
+  optional dotted `selector` to a list of spec versions (or treats the document
+  itself as a single spec), diffs each consecutive pair and emits one entry per
+  structural change instead of relying on prose. For a single spec the document
+  is diffed against the empty spec, so first-time registration surfaces the
+  whole surface as `info` entries — the baseline is visible without alerting.
+  The severity is derived from the kind of change:
+  - `critical` — removed path, removed operation, removed required parameter,
+    removed enum value, changed parameter location, changed response status code
+    set;
+  - `warning` — added required parameter, narrowed enum, changed parameter type,
+    changed request/response schema type, changed `required` on a body property;
+  - `info` — added path, added optional parameter, added enum value, added
+    response status code, changed description.
+  Ordering-only changes and whitespace-only description changes are ignored so
+  the content-hash de-duplication in `store.py` keeps working. Each entry's
+  title is `"<METHOD> <path>: <change kind>"`, its body carries the old and new
+  value, its link is `base_url` plus the spec's `info.contact.url` when present,
+  its `published` date comes from the newer spec's `info.version`, and its
+  categories include the change kind and the affected path.
 - **Per-source selectors:** `html` sources accept a CSS-like simple selector
   (tag, `#id`, `.class`, e.g. `h2.deprecation` or `#changelog`) and `json` /
-  `github` sources accept a dotted path (e.g. `data.releases`), so noisy pages
-  yield the right blocks without code changes.
+  `github` / `openapi` sources accept a dotted path (e.g. `data.releases` or
+  `versions`), so noisy pages yield the right blocks without code changes.
 - **Relevance engine:** detects deprecation / breaking-change language
   (`deprecated`, `sunset`, `end of life`, `removed`, `breaking`, …) and boosts
   entries that mention a tracked version. Classifies each hit as
@@ -126,6 +148,12 @@ change. It means different things per kind:
   - `data.releases` → walk `data` then `releases` before collecting entries.
 - **`github`** – the same dotted path syntax, useful for wrapped API payloads.
   - `data.releases` → walk `data` then `releases` before collecting entries.
+- **`openapi`** – the same dotted path syntax, pointing at the list of spec
+  versions in the fetched document. Each consecutive pair is diffed oldest
+  first. When the selector is omitted (or resolves to a single spec) the
+  document is treated as one spec and diffed against the empty spec, so a
+  first registration reports the whole surface as `info` entries.
+  - `versions` → walk the top-level `versions` array of spec objects.
 
 Every source also accepts an optional `min_severity` (`critical`, `warning` or
 `info`, default `info`). An entry is only turned into an alert when its severity
@@ -152,6 +180,14 @@ curl -X POST http://localhost:8080/api/sources \
   -H 'Content-Type: application/json' \
   -d '{"name":"Widget SDK","url":"https://github.com/acme/widget","kind":"github",
        "api_name":"Widget","tracked_versions":["v2"],"min_severity":"warning"}'
+
+# OpenAPI spec: diff the versions array and only alert on warning or critical
+# structural changes (removed paths, narrowed enums, added required params, ...).
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Acme API spec","url":"https://api.acme.com/openapi.json",
+       "kind":"openapi","api_name":"Acme","tracked_versions":["v2"],
+       "selector":"versions","min_severity":"warning"}'
 ```
 
 ## Next direction
@@ -169,8 +205,13 @@ while still recording the underlying entries.
 through the GitHub REST API and normalizes the repository HTML URL to the API
 URL, so breaking-change notes in release bodies are parsed and classified.
 
-1. **More source adapters:** OpenAPI diff detection (GitHub releases is
-   shipped above).
+*Shipped:* **OpenAPI diff detection** (see *Current capabilities*) — an
+`openapi` source kind that diffs two spec versions (or one spec against the
+empty spec) and emits one entry per structural change, with the severity
+derived from the kind of change rather than from prose.
+
+1. **More source adapters:** additional structured feeds beyond the shipped
+   GitHub releases and OpenAPI adapters.
 2. **Smarter relevance:** semantic matching of version ranges (semver / date
    versions), per-team severity rules and richer keyword tuning.
 3. **Integrations:** GitHub/GitLab issues and Jira as delivery targets.
@@ -183,10 +224,15 @@ URL, so breaking-change notes in release bodies are parsed and classified.
 
 ```
 sources ──▶ fetcher ──▶ parsers ──▶ relevance ──▶ store (SQLite)
-                                              └─▶ notifiers (Slack / e-mail / console)
+                          │                     └─▶ notifiers (Slack / e-mail / console)
+                          └─ adapters: rss · html · json · statuspage · github · openapi
                                                         ▲
 HTTP API + dashboard ──▶ engine (scan) ──▶ scheduler (background poll)
 ```
+
+The `parsers` stage hosts one adapter per source kind; the `openapi` adapter is
+a pure in-memory diff over two fetched spec versions and fits the same
+`parse` → `ParsedEntry` contract as the text adapters.
 
 The design keeps a hard separation between I/O (`fetcher`), pure logic
 (`parsers`, `relevance`), state (`store`), side effects (`notify`) and the

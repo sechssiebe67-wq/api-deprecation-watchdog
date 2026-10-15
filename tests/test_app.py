@@ -269,6 +269,44 @@ class OpenAppTests(AppTestCase):
         status, body = self.request("GET", "/api/entries")
         self.assertEqual(len(json.loads(body)["entries"]), 2)
 
+    def test_create_openapi_source_accepts_selector_and_min_severity(self):
+        url = "https://api.acme.com/openapi.json"
+        status, body = self.request(
+            "POST",
+            "/api/sources",
+            {
+                "name": "Acme API spec",
+                "url": url,
+                "kind": "openapi",
+                "api_name": "Acme",
+                "tracked_versions": ["v2"],
+                "selector": "versions",
+                "min_severity": "warning",
+            },
+        )
+        self.assertEqual(status, 201)
+        source = json.loads(body)
+        self.assertEqual(source["kind"], "openapi")
+        self.assertEqual(source["selector"], "versions")
+        self.assertEqual(source["min_severity"], "warning")
+        # Non-GitHub URLs are never normalized, including openapi sources.
+        self.assertEqual(source["url"], url)
+
+        status, body = self.request("GET", "/api/sources")
+        self.assertEqual(status, 200)
+        stored = json.loads(body)["sources"][0]
+        self.assertEqual(stored["selector"], "versions")
+
+    def test_openapi_url_is_not_normalized(self):
+        source = validate_source_payload(
+            {
+                "name": "Acme API spec",
+                "url": "https://github.com/acme/widget",
+                "kind": "openapi",
+            }
+        )
+        self.assertEqual(source.url, "https://github.com/acme/widget")
+
     def test_delete_source(self):
         _, body = self.request(
             "POST", "/api/sources", {"name": "Example", "url": FEED_URL, "kind": "rss"}

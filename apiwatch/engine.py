@@ -71,6 +71,14 @@ class Engine:
         parsed = parsers.parse(source.kind, body, base_url=source.url, selector=source.selector)
         result.sources_checked = 1
         result.entries_seen = len(parsed)
+        if (
+            source.kind == "openapi"
+            and body.strip()
+            and parsers.openapi_document(body) is None
+        ):
+            # Distinguish malformed input from a legitimate no-op diff: record an
+            # error but keep scanning the other sources.
+            result.errors.append("%s: malformed OpenAPI input" % source.name)
 
         versions = source.tracked_versions or []
         new_alerts: List[Alert] = []

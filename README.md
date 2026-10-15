@@ -18,15 +18,20 @@ actually use.
 
 ## Features
 
-- **Source registry** for RSS/Atom, JSON, HTML, statuspage.io and GitHub
-  releases (`rss`, `json`, `html`, `statuspage`, `github`).
-- **Parsers** for all five formats, with no third-party dependencies. The
+- **Source registry** for RSS/Atom, JSON, HTML, statuspage.io, GitHub releases
+  and OpenAPI/Swagger specs (`rss`, `json`, `html`, `statuspage`, `github`,
+  `openapi`).
+- **Parsers** for all six formats, with no third-party dependencies. The
   `github` kind accepts either `https://api.github.com/repos/<owner>/<repo>/releases`
   or the repository HTML URL `https://github.com/<owner>/<repo>`, which is
   normalized to the API URL on registration.
+- **OpenAPI diff detection**: the `openapi` kind diffs two spec versions (from
+  a selected list) and emits one entry per structural change — removed paths or
+  operations, narrowed enums, added required parameters — with a severity
+  derived from the kind of change rather than from changelog prose.
 - **Per-source selectors** for precise extraction: a CSS-like selector for
-  `html` (`h2.deprecation`, `#changelog`) and a dotted path for `json` and
-  `github` (`data.releases`).
+  `html` (`h2.deprecation`, `#changelog`) and a dotted path for `json`,
+  `github` and `openapi` (`data.releases`, `versions`).
 - **Relevance engine** that detects deprecation / breaking-change language and
   boosts entries referencing tracked versions; classifies hits as `critical`,
   `warning` or `info` (the severity ladder, highest to lowest).
@@ -107,17 +112,18 @@ Register a source. The `POST /api/sources` payload accepts:
 | ------------------ | -------- | ------------------------------------------------------------- |
 | `name`             | yes      | Display name                                                  |
 | `url`              | yes      | `http(s)` URL to fetch                                         |
-| `kind`             | yes      | `rss`, `json`, `html`, `statuspage` or `github`               |
+| `kind`             | yes      | `rss`, `json`, `html`, `statuspage`, `github` or `openapi`   |
 | `api_name`         | no       | API/SDK the source documents                                  |
 | `tracked_versions` | no       | Versions to boost during relevance scoring                    |
-| `selector`         | no       | Extraction hint; CSS-like for `html`, dotted path for `json`/`github` |
+| `selector`         | no       | Extraction hint; CSS-like for `html`, dotted path for `json`/`github`/`openapi` |
 | `enabled`          | no       | Whether the scheduler polls it (default `true`)               |
 | `min_severity`     | no       | Lowest severity that creates an alert: `critical`, `warning` or `info` (default `info`) |
 
 For `html`, `selector` is a CSS-like simple selector (optional tag, `#id`,
 `.class`, or a combination). It matches a block when the block or an ancestor
-satisfies it, so `#changelog` scopes extraction to that container. For `json`
-and `github`, `selector` is a dotted path such as `data.releases`.
+satisfies it, so `#changelog` scopes extraction to that container. For `json`,
+`github` and `openapi`, `selector` is a dotted path such as `data.releases` or
+`versions`.
 
 For `github` sources, `url` may be either the releases REST API URL
 (`https://api.github.com/repos/<owner>/<repo>/releases`) or the repository HTML
@@ -127,6 +133,29 @@ release becomes an entry whose title is the release `name` or `tag_name`, body
 is the release `body`, link is `html_url`, date is `published_at`, and whose
 categories include the `tag_name` and, when set, `prerelease`; draft releases
 are skipped.
+
+For `openapi` sources, `url` points at an OpenAPI or Swagger JSON document.
+Without a `selector` the document itself is treated as a single spec; with a
+dotted `selector` (for example `versions`) it is walked to a list of spec
+versions, and each consecutive pair is diffed oldest first. A single spec is
+diffed against the empty spec, so the first registration surfaces the whole
+surface as `info` entries instead of staying silent. Every structural change
+becomes one entry titled `"<METHOD> <path>: <change kind>"`, with the old and
+new value in the body, the change kind and affected path in `categories`, a
+link built from `url` plus the spec's `info.contact.url`, and `published` from
+the newer spec's `info.version`. The adapter is dependency-free and relies only
+on the standard library.
+
+The severity is derived from the kind of change, not from keywords:
+
+| Severity  | Change kinds                                                                 |
+| --------- | ---------------------------------------------------------------------------- |
+| `critical`| removed path, removed operation, removed required parameter, removed enum value, changed parameter location, changed response status code set |
+| `warning` | added required parameter, narrowed enum, changed parameter type, changed request/response schema type, changed `required` on a body property |
+| `info`    | added path, added optional parameter, added enum value, added response status code, changed description |
+
+Ordering-only changes and whitespace-only description changes are ignored, so
+re-scanning an unchanged spec creates no new entries or alerts.
 
 `min_severity` controls the per-source alert floor. The relevance engine still
 classifies and stores every matched entry, but only entries whose severity ranks
@@ -161,6 +190,13 @@ curl -X POST http://localhost:8080/api/sources \
   -H 'Content-Type: application/json' \
   -d '{"name":"Widget SDK","url":"https://github.com/acme/widget","kind":"github",
        "api_name":"Widget","tracked_versions":["v2"],"min_severity":"warning"}'
+
+# OpenAPI spec: diff the versions array and alert on warning+ structural changes.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Acme API spec","url":"https://api.acme.com/openapi.json",
+       "kind":"openapi","api_name":"Acme","tracked_versions":["v2"],
+       "selector":"versions","min_severity":"warning"}'
 ```
 
 ## Digest notifications
