@@ -4,7 +4,7 @@ import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from apiwatch.app import create_server
+from apiwatch.app import create_server, validate_source_payload
 from apiwatch.config import Config
 from apiwatch.engine import Engine
 from apiwatch.fetcher import FakeFetcher
@@ -31,6 +31,32 @@ STATUSPAGE = json.dumps(
             }
         ]
     }
+)
+
+
+GITHUB_HTML_URL = "https://github.com/acme/widget"
+GITHUB_API_URL = "https://api.github.com/repos/acme/widget/releases"
+GITHUB_RELEASES = json.dumps(
+    [
+        {
+            "name": "v2.0.0",
+            "tag_name": "v2.0.0",
+            "body": "This release contains a breaking change in the auth API.",
+            "html_url": "https://github.com/acme/widget/releases/tag/v2.0.0",
+            "published_at": "2024-05-01T00:00:00Z",
+            "prerelease": False,
+            "draft": False,
+        },
+        {
+            "name": "v1.9.0",
+            "tag_name": "v1.9.0",
+            "body": "New version released with minor fixes.",
+            "html_url": "https://github.com/acme/widget/releases/tag/v1.9.0",
+            "published_at": "2024-04-01T00:00:00Z",
+            "prerelease": False,
+            "draft": False,
+        },
+    ]
 )
 
 
@@ -164,6 +190,84 @@ class OpenAppTests(AppTestCase):
         self.assertEqual(payload["alerts_created"], 1)
         self.assertEqual(payload["alerts"][0]["severity"], "warning")
         self.assertIn("v1", payload["alerts"][0]["version_hits"])
+
+    def test_github_url_normalization(self):
+        source = validate_source_payload(
+            {"name": "Widget SDK", "url": GITHUB_HTML_URL, "kind": "github"}
+        )
+        self.assertEqual(source.url, GITHUB_API_URL)
+        self.assertEqual(
+            validate_source_payload(
+                {"name": "Widget SDK", "url": GITHUB_HTML_URL + ".git", "kind": "github"}
+            ).url,
+            GITHUB_API_URL,
+        )
+        self.assertEqual(
+            validate_source_payload(
+                {"name": "Widget SDK", "url": GITHUB_API_URL, "kind": "github"}
+            ).url,
+            GITHUB_API_URL,
+        )
+        # Non-GitHub URLs are left untouched.
+        self.assertEqual(
+            validate_source_payload(
+                {"name": "Feed", "url": FEED_URL, "kind": "rss"}
+            ).url,
+            FEED_URL,
+        )
+
+    def test_create_github_source_normalizes_url(self):
+        status, body = self.request(
+            "POST",
+            "/api/sources",
+            {
+                "name": "Widget SDK",
+                "url": GITHUB_HTML_URL,
+                "kind": "github",
+                "api_name": "Widget",
+                "tracked_versions": ["v2"],
+                "min_severity": "warning",
+            },
+        )
+        self.assertEqual(status, 201)
+        source = json.loads(body)
+        self.assertEqual(source["kind"], "github")
+        self.assertEqual(source["url"], GITHUB_API_URL)
+
+        status, body = self.request("GET", "/api/sources")
+        self.assertEqual(status, 200)
+        sources = json.loads(body)["sources"]
+        self.assertEqual(sources[0]["kind"], "github")
+        self.assertEqual(sources[0]["url"], GITHUB_API_URL)
+
+    def test_github_source_scan_respects_floor_and_alerts(self):
+        self.fetcher.responses[GITHUB_API_URL] = GITHUB_RELEASES
+        status, _ = self.request(
+            "POST",
+            "/api/sources",
+            {
+                "name": "Widget SDK",
+                "url": GITHUB_HTML_URL,
+                "kind": "github",
+                "api_name": "Widget",
+                "tracked_versions": ["v2"],
+                "min_severity": "warning",
+            },
+        )
+        self.assertEqual(status, 201)
+
+        status, body = self.request("POST", "/api/check")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        # The breaking-change release alerts; the info release is stored but
+        # suppressed by the warning floor.
+        self.assertEqual(payload["entries_new"], 2)
+        self.assertEqual(payload["alerts_created"], 1)
+        self.assertEqual(payload["alerts"][0]["severity"], "critical")
+        self.assertIn("breaking change", payload["alerts"][0]["title"] + payload["alerts"][0]["reason"])
+
+        status, body = self.request("GET", "/api/entries")
+        self.assertEqual(len(json.loads(body)["entries"]), 2)
 
     def test_delete_source(self):
         _, body = self.request(

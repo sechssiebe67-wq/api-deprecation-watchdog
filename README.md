@@ -18,12 +18,15 @@ actually use.
 
 ## Features
 
-- **Source registry** for RSS/Atom, JSON, HTML and statuspage.io (`rss`,
-  `json`, `html`, `statuspage`).
-- **Parsers** for all four formats, with no third-party dependencies.
+- **Source registry** for RSS/Atom, JSON, HTML, statuspage.io and GitHub
+  releases (`rss`, `json`, `html`, `statuspage`, `github`).
+- **Parsers** for all five formats, with no third-party dependencies. The
+  `github` kind accepts either `https://api.github.com/repos/<owner>/<repo>/releases`
+  or the repository HTML URL `https://github.com/<owner>/<repo>`, which is
+  normalized to the API URL on registration.
 - **Per-source selectors** for precise extraction: a CSS-like selector for
-  `html` (`h2.deprecation`, `#changelog`) and a dotted path for `json`
-  (`data.releases`).
+  `html` (`h2.deprecation`, `#changelog`) and a dotted path for `json` and
+  `github` (`data.releases`).
 - **Relevance engine** that detects deprecation / breaking-change language and
   boosts entries referencing tracked versions; classifies hits as `critical`,
   `warning` or `info` (the severity ladder, highest to lowest).
@@ -104,17 +107,26 @@ Register a source. The `POST /api/sources` payload accepts:
 | ------------------ | -------- | ------------------------------------------------------------- |
 | `name`             | yes      | Display name                                                  |
 | `url`              | yes      | `http(s)` URL to fetch                                         |
-| `kind`             | yes      | `rss`, `json`, `html` or `statuspage`                         |
+| `kind`             | yes      | `rss`, `json`, `html`, `statuspage` or `github`               |
 | `api_name`         | no       | API/SDK the source documents                                  |
 | `tracked_versions` | no       | Versions to boost during relevance scoring                    |
-| `selector`         | no       | Extraction hint; CSS-like for `html`, dotted path for `json`  |
+| `selector`         | no       | Extraction hint; CSS-like for `html`, dotted path for `json`/`github` |
 | `enabled`          | no       | Whether the scheduler polls it (default `true`)               |
 | `min_severity`     | no       | Lowest severity that creates an alert: `critical`, `warning` or `info` (default `info`) |
 
 For `html`, `selector` is a CSS-like simple selector (optional tag, `#id`,
 `.class`, or a combination). It matches a block when the block or an ancestor
-satisfies it, so `#changelog` scopes extraction to that container. For `json`,
-`selector` is a dotted path such as `data.releases`.
+satisfies it, so `#changelog` scopes extraction to that container. For `json`
+and `github`, `selector` is a dotted path such as `data.releases`.
+
+For `github` sources, `url` may be either the releases REST API URL
+(`https://api.github.com/repos/<owner>/<repo>/releases`) or the repository HTML
+URL (`https://github.com/<owner>/<repo>`, with or without a trailing `.git`).
+The HTML form is normalized to the API URL when the source is stored. Each
+release becomes an entry whose title is the release `name` or `tag_name`, body
+is the release `body`, link is `html_url`, date is `published_at`, and whose
+categories include the `tag_name` and, when set, `prerelease`; draft releases
+are skipped.
 
 `min_severity` controls the per-source alert floor. The relevance engine still
 classifies and stores every matched entry, but only entries whose severity ranks
@@ -143,6 +155,12 @@ curl -X POST http://localhost:8080/api/sources \
   -H 'Content-Type: application/json' \
   -d '{"name":"Acme Status","url":"https://status.acme.com/api/v2/incidents.json",
        "kind":"statuspage","api_name":"Acme","tracked_versions":["v1"]}'
+
+# GitHub releases: paste the repo URL, it is normalized to the REST API URL.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Widget SDK","url":"https://github.com/acme/widget","kind":"github",
+       "api_name":"Widget","tracked_versions":["v2"],"min_severity":"warning"}'
 ```
 
 ## Digest notifications

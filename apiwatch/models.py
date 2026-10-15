@@ -5,7 +5,7 @@ Plain dataclasses so the core logic stays dependency-free and easy to test.
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-SOURCE_KINDS = ("rss", "html", "json", "statuspage")
+SOURCE_KINDS = ("rss", "html", "json", "statuspage", "github")
 SEVERITIES = ("critical", "warning", "info")
 
 

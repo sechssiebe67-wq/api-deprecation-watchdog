@@ -6,11 +6,12 @@ Supported kinds:
 * ``json``       – JSON changelogs in several common shapes.
 * ``html``       – HTML changelogs built from headings / list items.
 * ``statuspage`` – statuspage.io JSON (``incidents`` / ``scheduled_maintenances``).
+* ``github``     – GitHub releases JSON from the REST API (``/releases``).
 
 HTML and JSON sources accept an optional ``selector`` to narrow extraction:
 for ``html`` the selector is a CSS-like simple selector (tag name, ``#id``,
-``.class`` or a combination such as ``h2.deprecation``); for ``json`` it is a
-dotted path such as ``data.releases``.
+``.class`` or a combination such as ``h2.deprecation``); for ``json`` and
+``github`` it is a dotted path such as ``data.releases``.
 
 All parsers return a list of :class:`ParsedEntry` objects and never raise on
 malformed input; they degrade to an empty list instead. Pure functions keep the
@@ -323,6 +324,64 @@ def _statuspage_entry(item: dict, base_url: str) -> ParsedEntry:
 
 
 # --------------------------------------------------------------------------- #
+# GitHub releases
+# --------------------------------------------------------------------------- #
+def parse_github(text: str, base_url: str = "", selector: Optional[str] = None) -> List[ParsedEntry]:
+    """Parse GitHub releases JSON (REST API ``/repos/:owner/:repo/releases``).
+
+    Maps each release to a :class:`ParsedEntry`: title from ``name`` or
+    ``tag_name``, body from ``body``, link from ``html_url``, date from
+    ``published_at`` and categories from ``tag_name``, ``prerelease`` and
+    ``draft``. Draft releases are skipped. Malformed input (including non-JSON)
+    is tolerated and yields an empty list rather than raising.
+    """
+    if not text or not text.strip():
+        return []
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return []
+
+    if selector:
+        data = _apply_selector(data, selector)
+    if not isinstance(data, list):
+        return []
+
+    entries: List[ParsedEntry] = []
+    for item in data:
+        if not isinstance(item, dict) or item.get("draft"):
+            continue
+        title = _first(item, ("name", "tag_name"))
+        body = _first(item, ("body",))
+        link = _first(item, ("html_url",))
+        published = _first(item, ("published_at",))
+
+        categories: List[str] = []
+        tag = item.get("tag_name")
+        if tag not in (None, ""):
+            cleaned = _clean(str(tag))
+            if cleaned:
+                categories.append(cleaned)
+        if item.get("prerelease"):
+            categories.append("prerelease")
+        if item.get("draft"):
+            categories.append("draft")
+
+        if not (title or body):
+            continue
+        entries.append(
+            ParsedEntry(
+                title=title or body[:120],
+                body=body,
+                link=urljoin(base_url, link) if link else "",
+                published=published,
+                categories=categories,
+            )
+        )
+    return entries
+
+
+# --------------------------------------------------------------------------- #
 # HTML
 # --------------------------------------------------------------------------- #
 _HTML_BLOCK_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6", "p", "li"})
@@ -519,4 +578,6 @@ def parse(kind: str, text: str, base_url: str = "", selector: Optional[str] = No
         return parse_html(text, base_url, selector)
     if kind == "statuspage":
         return parse_statuspage(text, base_url, selector)
+    if kind == "github":
+        return parse_github(text, base_url, selector)
     return []

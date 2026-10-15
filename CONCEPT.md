@@ -28,7 +28,7 @@ heterogeneous noise into a single prioritized alert stream.
 
 - Deprecation-focused detection instead of generic uptime/API monitoring.
 - Rule-based extraction from heterogeneous sources (RSS, HTML, JSON,
-  statuspage.io), with per-source selectors for precision.
+  statuspage.io and GitHub releases), with per-source selectors for precision.
 - Relevance filtering against the API versions a team actually uses, so the
   signal stays small.
 - Delivery into existing developer workflows; no agent installation required.
@@ -36,16 +36,22 @@ heterogeneous noise into a single prioritized alert stream.
 ## Current capabilities (MVP increment)
 
 - **Source registry:** add, list and remove monitored sources with a kind
-  (`rss`, `html`, `json`, `statuspage`), an API name, the tracked versions and an
-  optional per-source selector.
+  (`rss`, `html`, `json`, `statuspage`, `github`), an API name, the tracked
+  versions and an optional per-source selector.
 - **Parsers:** built-in parsers for RSS/Atom XML, JSON changelogs (several
-  common shapes), HTML changelogs (headings + following content) and
-  statuspage.io JSON (`incidents` + `scheduled_maintenances`), all
-  dependency-free.
+  common shapes), HTML changelogs (headings + following content),
+  statuspage.io JSON (`incidents` + `scheduled_maintenances`) and GitHub
+  releases (`releases` + pre-releases via the REST API), all dependency-free.
+  A `github` registration accepts either the API URL
+  (`https://api.github.com/repos/owner/repo/releases`) or the repository HTML
+  URL (`https://github.com/owner/repo`), which is normalized to the API URL;
+  release `name`/`tag_name` becomes the title, `body` the body, `html_url` the
+  link, `published_at` the date and `tag_name`/`prerelease` the categories,
+  while drafts are skipped.
 - **Per-source selectors:** `html` sources accept a CSS-like simple selector
-  (tag, `#id`, `.class`, e.g. `h2.deprecation` or `#changelog`) and `json`
-  sources accept a dotted path (e.g. `data.releases`), so noisy pages yield the
-  right blocks without code changes.
+  (tag, `#id`, `.class`, e.g. `h2.deprecation` or `#changelog`) and `json` /
+  `github` sources accept a dotted path (e.g. `data.releases`), so noisy pages
+  yield the right blocks without code changes.
 - **Relevance engine:** detects deprecation / breaking-change language
   (`deprecated`, `sunset`, `end of life`, `removed`, `breaking`, …) and boosts
   entries that mention a tracked version. Classifies each hit as
@@ -118,6 +124,8 @@ change. It means different things per kind:
   - `#changelog` → only the blocks nested inside `id="changelog"`.
 - **`json`** – a dotted path into the document.
   - `data.releases` → walk `data` then `releases` before collecting entries.
+- **`github`** – the same dotted path syntax, useful for wrapped API payloads.
+  - `data.releases` → walk `data` then `releases` before collecting entries.
 
 Every source also accepts an optional `min_severity` (`critical`, `warning` or
 `info`, default `info`). An entry is only turned into an alert when its severity
@@ -138,6 +146,12 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Acme","url":"https://api.acme.com/changelog.json","kind":"json",
        "api_name":"Acme","selector":"data.releases","tracked_versions":["v2"],
        "min_severity":"warning"}'
+
+# GitHub releases: paste the repo URL, it is normalized to the REST API URL.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Widget SDK","url":"https://github.com/acme/widget","kind":"github",
+       "api_name":"Widget","tracked_versions":["v2"],"min_severity":"warning"}'
 ```
 
 ## Next direction
@@ -150,7 +164,13 @@ immediate alerts.
 `min_severity` on each source that suppresses alerts below the chosen severity
 while still recording the underlying entries.
 
-1. **More source adapters:** GitHub releases and OpenAPI diff detection.
+*Shipped:* **GitHub releases adapter** (see *Current capabilities*) — a
+`github` source kind that watches a repository's releases and pre-releases
+through the GitHub REST API and normalizes the repository HTML URL to the API
+URL, so breaking-change notes in release bodies are parsed and classified.
+
+1. **More source adapters:** OpenAPI diff detection (GitHub releases is
+   shipped above).
 2. **Smarter relevance:** semantic matching of version ranges (semver / date
    versions), per-team severity rules and richer keyword tuning.
 3. **Integrations:** GitHub/GitLab issues and Jira as delivery targets.
