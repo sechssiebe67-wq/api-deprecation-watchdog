@@ -8,6 +8,8 @@ import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from .models import ALL_CHANNELS, NOTIFY_CHANNELS
+
 log = logging.getLogger("apiwatch.config")
 
 DIGEST_MODES = ("off", "digest", "both")
@@ -28,6 +30,21 @@ def _digest_mode(value: Optional[str]) -> str:
     return mode
 
 
+def _notify_channels(value: Optional[str]) -> List[str]:
+    """Parse ``NOTIFY_CHANNELS`` into the default routing for new sources."""
+    channels = [
+        item.strip().lower() for item in (value or "").split(",") if item.strip()
+    ]
+    if not channels:
+        return [ALL_CHANNELS]
+    allowed = set(NOTIFY_CHANNELS) | {ALL_CHANNELS}
+    invalid = [channel for channel in channels if channel not in allowed]
+    if invalid:
+        log.warning("invalid NOTIFY_CHANNELS %r; falling back to 'all'", value)
+        return [ALL_CHANNELS]
+    return channels
+
+
 @dataclass
 class Config:
     port: int = 8080
@@ -46,6 +63,7 @@ class Config:
     smtp_to: List[str] = field(default_factory=list)
     smtp_starttls: bool = True
     seed_sources: bool = True
+    notify_channels: List[str] = field(default_factory=lambda: [ALL_CHANNELS])
     digest_mode: str = "off"
     digest_interval_seconds: int = 86400
     digest_max_alerts: int = 50
@@ -79,6 +97,7 @@ class Config:
             smtp_to=recipients,
             smtp_starttls=_bool(env.get("SMTP_STARTTLS"), default=True),
             seed_sources=_bool(env.get("SEED_SOURCES"), default=True),
+            notify_channels=_notify_channels(env.get("NOTIFY_CHANNELS")),
             digest_mode=_digest_mode(env.get("DIGEST_MODE")),
             digest_interval_seconds=max(
                 DIGEST_INTERVAL_MIN_SECONDS,

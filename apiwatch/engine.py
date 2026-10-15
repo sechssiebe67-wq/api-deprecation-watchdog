@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Sequence
 from . import digest as digest_builder
 from . import parsers
 from .fetcher import FetchError, Fetcher
-from .models import Alert, Digest, Entry, Source
+from .models import ALL_CHANNELS, Alert, Digest, Entry, Source
 from .notify import NotificationError, Notifier, format_alert
 from .relevance import analyze, meets_floor
 from .store import Store
@@ -144,57 +144,107 @@ class Engine:
         return result
 
     def dispatch(self, alerts: List[Alert], mark: bool = True) -> None:
+        """Fan alerts out to the notifiers each source is routed to.
+
+        A notifier is only called when at least one alert routes to it, and an
+        alert is only marked notified once it has been accepted by at least one
+        notifier. This preserves the previous behaviour (a delivered alert is
+        marked, a failed notifier is logged and skipped) while honouring the
+        per-source ``notify_channels`` routing.
+        """
         if not alerts or not self.notifiers:
             return
         names = self._source_names()
-        delivered = False
+        channels = self._source_channels()
+        delivered_ids = set()
         for notifier in self.notifiers:
+            batch = [
+                alert
+                for alert in alerts
+                if self._routes_to(channels.get(alert.source_id), notifier.name)
+            ]
+            if not batch:
+                continue
             try:
-                notifier.send(alerts, names)
-                delivered = True
+                notifier.send(batch, names)
             except NotificationError as exc:
                 log.warning("notifier %s failed: %s", notifier.name, exc)
+                continue
             except Exception as exc:  # pragma: no cover - defensive
                 log.warning("notifier %s crashed: %s", notifier.name, exc)
-        if delivered and mark:
-            self.store.mark_notified([alert.id for alert in alerts if alert.id is not None])
+                continue
+            for alert in batch:
+                if alert.id is not None:
+                    delivered_ids.add(alert.id)
+        if mark and delivered_ids:
+            self.store.mark_notified(sorted(delivered_ids))
 
     def flush_digest(self) -> Optional[Digest]:
         """Build and deliver a digest for the pending alerts, if any.
 
         Never raises on notifier failure: the digest is logged and left
         undelivered so the failure can be observed without aborting the caller.
+        Alerts are grouped by the set of notifiers they route to, so every
+        notifier receives a digest containing only its routed alerts.
         """
         alerts = self.store.list_undigested_alerts()
         if not alerts:
             return None
         names = self._source_names()
-        digest = digest_builder.build_digest(
-            alerts, names, max_alerts=self.digest_max_alerts
-        )
-        stored = self.store.create_digest(digest)
-        alert_ids = [alert.id for alert in alerts if alert.id is not None]
-        if self._deliver_digest(stored, names):
+        if not self.notifiers:
+            # No external channel is configured; the digest is still recorded.
+            stored = self.store.create_digest(
+                digest_builder.build_digest(
+                    alerts, names, max_alerts=self.digest_max_alerts
+                )
+            )
+            alert_ids = [alert.id for alert in alerts if alert.id is not None]
             self.store.attach_alerts_to_digest(stored.id, alert_ids)
             self.store.mark_digest_delivered(stored.id)
             self.store.mark_notified(alert_ids)
             stored.delivered = True
-        return stored
+            return stored
 
-    def _deliver_digest(self, digest: Digest, names: Dict[int, str]) -> bool:
-        if not self.notifiers:
-            # No external channel is configured; the digest is still recorded.
-            return True
-        delivered = False
-        for notifier in self.notifiers:
-            try:
-                notifier.send_digest(digest, names)
-                delivered = True
-            except NotificationError as exc:
-                log.warning("digest notifier %s failed: %s", notifier.name, exc)
-            except Exception as exc:  # pragma: no cover - defensive
-                log.warning("digest notifier %s crashed: %s", notifier.name, exc)
-        return delivered
+        channels = self._source_channels()
+        groups: Dict[frozenset, List[Alert]] = {}
+        for alert in alerts:
+            recipients = self._recipients(channels.get(alert.source_id))
+            groups.setdefault(recipients, []).append(alert)
+
+        last: Optional[Digest] = None
+        for recipients, group_alerts in groups.items():
+            if not recipients:
+                # Routed to a channel that is not configured: leave it pending
+                # so it is delivered once that notifier is enabled.
+                continue
+            stored = self.store.create_digest(
+                digest_builder.build_digest(
+                    group_alerts, names, max_alerts=self.digest_max_alerts
+                )
+            )
+            delivered_ids = set()
+            for notifier in self.notifiers:
+                if notifier.name not in recipients:
+                    continue
+                try:
+                    notifier.send_digest(stored, names)
+                except NotificationError as exc:
+                    log.warning("digest notifier %s failed: %s", notifier.name, exc)
+                    continue
+                except Exception as exc:  # pragma: no cover - defensive
+                    log.warning("digest notifier %s crashed: %s", notifier.name, exc)
+                    continue
+                for alert in group_alerts:
+                    if alert.id is not None:
+                        delivered_ids.add(alert.id)
+            if delivered_ids:
+                alert_ids = sorted(delivered_ids)
+                self.store.attach_alerts_to_digest(stored.id, alert_ids)
+                self.store.mark_digest_delivered(stored.id)
+                self.store.mark_notified(alert_ids)
+                stored.delivered = True
+            last = stored
+        return last
 
     def _source_names(self) -> Dict[int, str]:
         return {
@@ -202,6 +252,25 @@ class Engine:
             for source in self.store.list_sources()
             if source.id is not None
         }
+
+    def _source_channels(self) -> Dict[int, List[str]]:
+        return {
+            source.id: list(source.notify_channels)
+            for source in self.store.list_sources()
+            if source.id is not None
+        }
+
+    @staticmethod
+    def _routes_to(channels: Optional[Sequence[str]], notifier_name: str) -> bool:
+        if not channels or ALL_CHANNELS in channels:
+            return True
+        return notifier_name in channels
+
+    def _recipients(self, channels: Optional[Sequence[str]]) -> frozenset:
+        if not channels or ALL_CHANNELS in channels:
+            return frozenset(notifier.name for notifier in self.notifiers)
+        names = {notifier.name for notifier in self.notifiers}
+        return frozenset(channel for channel in channels if channel in names)
 
     def preview(self, alerts: Sequence[Alert]) -> List[str]:
         names = {source.id: source.name for source in self.store.list_sources()}

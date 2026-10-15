@@ -40,6 +40,9 @@ actually use.
   the entries.
 - **SQLite history** with content-hash de-duplication (no repeated alerts).
 - **Notifications** via Slack webhook, SMTP e-mail and console.
+- **Per-source notification routing** via a `notify_channels` list, so a chatty
+  `info`-only source can go to Slack only while a critical dependency escalates
+  to e-mail. `all` (the default) keeps the fan-out to every notifier.
 - **Digest notifications** that batch alerts into a single grouped, severity-
   ordered summary on a configurable cadence (`off`, `digest` or `both`).
 - **Web dashboard** and a JSON API.
@@ -77,6 +80,7 @@ All configuration is environment based:
 | `FETCH_TIMEOUT_SECONDS`  | `20`    | Per-source HTTP timeout                             |
 | `DISABLE_SCHEDULER`      | `false` | Disable background polling                          |
 | `SEED_SOURCES`           | `true`  | Seed default sources on first start                 |
+| `NOTIFY_CHANNELS`        | `all`   | Default routing for sources that omit `notify_channels`; comma-separated `console`, `slack`, `email` or `all` |
 | `API_TOKEN`              | –       | Bearer token required for mutating endpoints        |
 | `SLACK_WEBHOOK_URL`      | –       | Slack incoming webhook for alert delivery           |
 | `SMTP_HOST` / `SMTP_PORT`| – / `587` | SMTP server for e-mail alerts                     |
@@ -118,6 +122,7 @@ Register a source. The `POST /api/sources` payload accepts:
 | `selector`         | no       | Extraction hint; CSS-like for `html`, dotted path for `json`/`github`/`openapi` |
 | `enabled`          | no       | Whether the scheduler polls it (default `true`)               |
 | `min_severity`     | no       | Lowest severity that creates an alert: `critical`, `warning` or `info` (default `info`) |
+| `notify_channels`  | no       | Channels that receive this source's alerts: a list of `console`, `slack`, `email` or `all` (default `all`) |
 
 For `html`, `selector` is a CSS-like simple selector (optional tag, `#id`,
 `.class`, or a combination). It matches a block when the block or an ancestor
@@ -164,6 +169,14 @@ at or above the floor become alerts. The ladder is `critical` > `warning` >
 notes but still alerts on `warning` and `critical` deprecations. Entries below
 the floor remain in the history (`/api/entries`) and are de-duplicated normally.
 
+`notify_channels` controls where a source's alerts are delivered. It is a list
+of `console`, `slack`, `email` or the literal `all`; omitting the field defaults
+to `all`, which fans every alert out to every configured notifier (the legacy
+behaviour). An empty list is treated as `all`. The same routing applies to
+digest delivery: each notifier receives a digest containing only the alerts
+routed to it. Set `NOTIFY_CHANNELS` to change the default for sources that omit
+the field. Unknown channel names are rejected with `400`.
+
 ```sh
 # HTML changelog, narrowed to deprecation headings.
 curl -X POST http://localhost:8080/api/sources \
@@ -197,6 +210,20 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Acme API spec","url":"https://api.acme.com/openapi.json",
        "kind":"openapi","api_name":"Acme","tracked_versions":["v2"],
        "selector":"versions","min_severity":"warning"}'
+
+# Chatty info-only source: route to Slack only, keep it out of e-mail.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Acme Release Notes","url":"https://api.acme.com/changelog.json",
+       "kind":"json","api_name":"Acme","selector":"data.releases",
+       "min_severity":"info","notify_channels":["slack"]}'
+
+# Critical dependency: escalate to e-mail only, no Slack noise.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Payments API","url":"https://status.payments.example/api/v2/incidents.json",
+       "kind":"statuspage","api_name":"Payments","tracked_versions":["v1"],
+       "min_severity":"warning","notify_channels":["email"]}'
 ```
 
 ## Digest notifications

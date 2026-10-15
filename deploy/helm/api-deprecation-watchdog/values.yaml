@@ -78,6 +78,9 @@ config:
   disableScheduler: false
   seedSources: true
   logLevel: INFO
+  # Default routing for sources that omit `notify_channels`: a comma-separated
+  # list of `console`, `slack`, `email` or `all`.
+  notifyChannels: "all"
   # off | digest | both. "digest" buffers alerts into scheduled summaries;
   # "both" sends immediate alerts and also includes them in the next digest.
   digestMode: "off"
