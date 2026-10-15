@@ -340,6 +340,54 @@ class EngineTruncationTests(unittest.TestCase):
         self.assertFalse(self.store.get_source(source.id).truncated)
         self.assertEqual(self.store.stats()["sources_truncated"], 0)
 
+    def test_truncated_openapi_body_is_not_a_failure_and_records_flag(self):
+        doc = json.dumps(
+            {
+                "openapi": "3.0.0",
+                "info": {"title": "Acme", "version": "1.0.0"},
+                "paths": {
+                    "/users": {"get": {"responses": {"200": {"description": "ok"}}}}
+                },
+            }
+        )
+        url = "https://example.com/openapi.json"
+        source = self.store.add_source(Source(name="Spec", url=url, kind="openapi"))
+        fetcher = FakeFetcher({url: doc + " " + "A" * 5000})
+        engine = Engine(self.store, fetcher, fetch_max_bytes=len(doc) + 10)
+        result = engine.scan_source(source)
+        self.assertEqual(result.sources_truncated, 1)
+        # The clipped body is not valid JSON, but that is an artifact of the cap
+        # rather than malformed input, so it must not increment failure_count or
+        # trip the breaker, and the truncation flag must still be persisted.
+        stored = self.store.get_source(source.id)
+        self.assertEqual(result.sources_failed, 0)
+        self.assertEqual(stored.failure_count, 0)
+        self.assertIsNone(stored.breaker_until)
+        self.assertTrue(stored.truncated)
+        self.assertEqual(self.store.stats()["sources_truncated"], 1)
+
+    def test_repeated_openapi_truncation_never_trips_breaker(self):
+        doc = json.dumps(
+            {
+                "openapi": "3.0.0",
+                "info": {"title": "Acme", "version": "1.0.0"},
+                "paths": {},
+            }
+        )
+        url = "https://example.com/openapi.json"
+        source = self.store.add_source(Source(name="Spec", url=url, kind="openapi"))
+        fetcher = FakeFetcher({url: doc + " " + "A" * 5000})
+        engine = Engine(
+            self.store, fetcher, breaker_threshold=2, fetch_max_bytes=len(doc) + 10
+        )
+        for _ in range(5):
+            result = engine.scan_source(source)
+            self.assertEqual(result.sources_truncated, 1)
+        stored = self.store.get_source(source.id)
+        self.assertEqual(stored.failure_count, 0)
+        self.assertIsNone(stored.breaker_until)
+        self.assertTrue(stored.truncated)
+
     def test_scan_all_aggregates_truncation(self):
         self.store.add_source(Source(name="Example", url=FEED_URL, kind="json"))
         engine = Engine(

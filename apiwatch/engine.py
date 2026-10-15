@@ -165,13 +165,17 @@ class Engine:
         parsed = parsers.parse(source.kind, body, base_url=source.url, selector=source.selector)
         result.sources_checked = 1
         result.entries_seen = len(parsed)
-        if (
+        malformed = (
             source.kind == "openapi"
             and body.strip()
             and parsers.openapi_document(body) is None
-        ):
+        )
+        if malformed and not truncated:
             # Distinguish malformed input from a legitimate no-op diff: record an
-            # error but keep scanning the other sources.
+            # error but keep scanning the other sources. A clipped body is never
+            # treated as malformed: the missing tail is an artifact of the byte
+            # cap, not a broken document, so truncation alone must not increment
+            # failure_count or trip the breaker.
             if self._register_failure(source):
                 result.errors.append(
                     "%s: circuit breaker tripped until %s"
@@ -180,7 +184,7 @@ class Engine:
             result.errors.append("%s: malformed OpenAPI input" % source.name)
         else:
             self._register_success(source)
-            self.store.record_source_truncation(source.id, truncated)
+        self.store.record_source_truncation(source.id, truncated)
 
         versions = source.tracked_versions or []
         new_alerts: List[Alert] = []
