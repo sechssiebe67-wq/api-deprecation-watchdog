@@ -125,6 +125,26 @@ heterogeneous noise into a single prioritized alert stream.
   per-source value and the global default are floored at 30 seconds to avoid
   hammering a source. A manual `POST /api/check` (and `Engine.scan_all()`)
   deliberately ignores the intervals and scans every enabled source.
+- **Per-source scan jitter:** every source optionally carries a
+  `scan_jitter_seconds` (a non-negative integer, default `0` / `None`, meaning
+  no jitter). When set, the scheduler delays that source's next scan by a
+  deterministic offset in `[0, scan_jitter_seconds]` derived from the source id
+  (`id % (jitter + 1)`), so many sources that share the same effective interval
+  no longer fire on the same tick. This spreads polling of a large registry
+  across a window — reducing thundering-herd pressure on shared upstreams such
+  as statuspages, GitHub/GitLab and vendor changelogs — while staying fully
+  reproducible and testable: the same source id and jitter always yield the same
+  offset, with no randomness. The effective next due time is
+  `last_scan + effective_interval + offset`, where the effective interval is the
+  per-source `scan_interval_seconds` when set and the deployment-wide
+  `POLL_INTERVAL_SECONDS` otherwise, so jitter composes with both. A value of
+  `0` (or omitting the field, or sending `null`) is the default and is
+  byte-for-byte equivalent to the pre-feature scheduler (same due times, same
+  wake-ups). The scheduler wakes at the smallest effective due time among
+  enabled, non-tripped sources and does not busy-loop while a jittered source is
+  not yet due. A manual `POST /api/check` (and `Engine.scan_all()`) ignores
+  jitter and intervals alike and scans every enabled source immediately, exactly
+  as it ignores intervals today.
 - **Per-source fetch size limits:** each fetch reads at most
   `FETCH_MAX_BYTES` (default `2000000`, i.e. 2 MB, floored at `1024`) bytes of a
   response body, and every source may override that with a positive `max_bytes`.
@@ -160,7 +180,8 @@ heterogeneous noise into a single prioritized alert stream.
   summarised by `sources_tripped` in `GET /api/stats`.
 - **Persistence:** SQLite store with de-duplication by content hash, so the same
   announcement is only alerted once.   The source table stores
-  `scan_interval_seconds`, `max_bytes` (integer or `NULL`), `headers` (JSON
+  `scan_interval_seconds`, `scan_jitter_seconds` (integer or `NULL`, where
+  `NULL`/`0` means no jitter), `max_bytes` (integer or `NULL`), `headers` (JSON
   text), `auth` (text),
   `extra_keywords` and `suppress_keywords` (JSON text),
   `failure_count` (integer, default `0`), `breaker_until` (text) and
@@ -235,9 +256,9 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `max_bytes`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `max_bytes`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
-| GET    | `/api/sources/:id`| Fetch one source (incl. breaker fields)   |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
+| GET    | `/api/sources/:id`| Fetch one source (incl. `scan_jitter_seconds` and breaker fields) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's `failure_count` and `breaker_until` (token protected) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
@@ -369,6 +390,41 @@ first tick after start scans every source. `POST /api/check` (and the engine's
 `scan_all()`) always scans every healthy enabled source regardless of the field
 (sources with a tripped circuit breaker are skipped, see *Circuit breaker*), so
 a manual check is never filtered by cadence.
+
+The optional `scan_jitter_seconds` field composes with the cadence. It is a
+non-negative integer (number of seconds) or omitted:
+
+- omitted, `null` or `0` → no jitter; the source's due time is exactly
+  `last_scan + effective_interval`, the original behaviour, so existing
+  registrations and databases are unaffected (and the scheduler's due times and
+  wake-ups are byte-for-byte identical to before the feature);
+- `300` → the scheduler adds a deterministic offset in `[0, 300]` to that
+  source's next scan, derived from the source id, so many sources with the same
+  effective interval no longer fire on the same tick.
+
+The offset is `source.id % (scan_jitter_seconds + 1)`: it is stable for a given
+source and jitter, never random, so scans are spread but reproducible and
+testable. The effective due time is therefore
+`last_scan + effective_interval + offset`, where `effective_interval` is the
+per-source `scan_interval_seconds` when set and `POLL_INTERVAL_SECONDS`
+otherwise. The background scheduler wakes at the smallest effective due time
+across enabled, non-tripped sources, so a jittered source is not rescanned until
+its offset has elapsed and the loop does not busy-loop while it waits.
+
+A value that is negative, non-integer, boolean or non-numeric is rejected with a
+`400` naming `scan_jitter_seconds`. Jitter is only consulted by the background
+scheduler: `POST /api/check` and `scan_all()` ignore both the intervals and the
+jitter and scan every healthy enabled source immediately.
+
+```sh
+# Spread 50 shared-upstream sources over a 5-minute window instead of
+# firing them all on the same tick, while keeping a 15-minute cadence.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Payments API","url":"https://status.payments.example/api/v2/incidents.json",
+       "kind":"statuspage","api_name":"Payments","tracked_versions":["v1"],
+       "scan_interval_seconds":900,"scan_jitter_seconds":300}'
+```
 
 ## Circuit breaker
 
@@ -610,6 +666,15 @@ newest-first, a first step toward richer per-dependency history views.
 fast cadence while a stable SDK keeps the global `POLL_INTERVAL_SECONDS`,
 without changing the manual `POST /api/check` semantics.
 
+*Shipped:* **per-source scan jitter** (see *Current capabilities* and
+*Scan cadence*) — an optional `scan_jitter_seconds` that adds a deterministic,
+id-derived offset to a source's due time, so a large registry spreads its polls
+across a window instead of firing every source on the same tick. This reduces
+thundering-herd pressure on shared upstreams, composes with both
+`scan_interval_seconds` and `POLL_INTERVAL_SECONDS`, leaves the default
+behaviour byte-for-byte unchanged, and is ignored by the manual
+`POST /api/check` path.
+
 *Shipped:* **generic webhook adapter** (see *Current capabilities*) — a
 `webhook` notifier channel that POSTs a dependency-free JSON payload to
 `WEBHOOK_URL`, plus a per-source `notify_webhook_url` override so a critical
@@ -697,11 +762,14 @@ fetcher and no network access.
 
 The `scheduler` sits on top of `engine`: it keeps an in-memory last-scan time
 per source, computes each source's effective interval (`scan_interval_seconds`
-or `POLL_INTERVAL_SECONDS`) and calls `engine.scan_sources` only for the sources
-that are due. `engine.scan_all` remains the "scan everything now" primitive used
-by the manual check endpoint, so the two entry points share one scanning
-implementation while keeping different cadence semantics. Both entry points skip
-sources whose circuit breaker is still tripped.
+or `POLL_INTERVAL_SECONDS`) plus the deterministic `scan_jitter_seconds` offset
+and calls `engine.scan_sources` only for the sources that are due. It wakes at
+the smallest effective due time among the enabled, non-tripped sources, so the
+jitter spreads load without delaying a due source indefinitely or busy-looping.
+`engine.scan_all` remains the "scan everything now" primitive used by the manual
+check endpoint, so the two entry points share one scanning implementation while
+keeping different cadence semantics; `scan_all` consults neither intervals nor
+jitter. Both entry points skip sources whose circuit breaker is still tripped.
 
 ## Constraints and risks
 

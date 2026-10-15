@@ -55,6 +55,7 @@ class Source:
     notify_channels: List[str] = field(default_factory=lambda: [ALL_CHANNELS])
     notify_webhook_url: Optional[str] = None
     scan_interval_seconds: Optional[int] = None
+    scan_jitter_seconds: Optional[int] = None
     max_bytes: Optional[int] = None
     headers: Dict[str, str] = field(default_factory=dict)
     auth: Optional[str] = None
@@ -81,6 +82,17 @@ class Source:
             # ``bool`` is an ``int`` subclass but is not a meaningful interval.
             if isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0:
                 raise ValueError("scan_interval_seconds must be a positive integer")
+        jitter = self.scan_jitter_seconds
+        if jitter is not None:
+            # ``bool`` is an ``int`` subclass but is not a meaningful jitter.
+            if isinstance(jitter, bool) or not isinstance(jitter, int) or jitter < 0:
+                raise ValueError(
+                    "scan_jitter_seconds must be a non-negative integer"
+                )
+            # ``0`` and ``None`` both mean "no jitter"; normalising keeps a single
+            # canonical representation in the store, the API and the scheduler.
+            if jitter == 0:
+                self.scan_jitter_seconds = None
         limit = self.max_bytes
         if limit is not None:
             # ``bool`` is an ``int`` subclass but is not a meaningful byte cap.
@@ -193,6 +205,7 @@ class Source:
             "notify_channels": list(self.notify_channels),
             "notify_webhook_url": self.notify_webhook_url,
             "scan_interval_seconds": self.scan_interval_seconds,
+            "scan_jitter_seconds": self.scan_jitter_seconds,
             "max_bytes": self.max_bytes,
             "headers": dict(self.headers),
             "auth": self.auth,

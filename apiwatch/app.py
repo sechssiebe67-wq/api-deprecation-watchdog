@@ -158,6 +158,17 @@ def validate_source_payload(
             raise ApiError(
                 400, "'scan_interval_seconds' must be a positive integer"
             )
+    scan_jitter = payload.get("scan_jitter_seconds")
+    if scan_jitter is not None:
+        # ``bool`` is an ``int`` subclass but is not a meaningful jitter.
+        if (
+            isinstance(scan_jitter, bool)
+            or not isinstance(scan_jitter, int)
+            or scan_jitter < 0
+        ):
+            raise ApiError(
+                400, "'scan_jitter_seconds' must be a non-negative integer"
+            )
     max_bytes = payload.get("max_bytes")
     if max_bytes is not None:
         # ``bool`` is an ``int`` subclass but is not a meaningful byte cap.
@@ -206,6 +217,7 @@ def validate_source_payload(
         notify_channels=normalized_channels,
         notify_webhook_url=notify_webhook_url,
         scan_interval_seconds=scan_interval,
+        scan_jitter_seconds=scan_jitter,
         max_bytes=max_bytes,
         headers=normalized_headers,
         auth=auth,

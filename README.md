@@ -54,6 +54,16 @@ actually use.
   cadence, so a volatile dependency can be polled every 15 minutes while a
   stable SDK is checked once a day. Omitting it keeps the global cadence; a
   manual `POST /api/check` always scans every enabled source.
+- **Per-source scan jitter**: each source has an optional
+  `scan_jitter_seconds` (non-negative integer, default none). When set, the
+  scheduler adds a deterministic offset in `[0, scan_jitter_seconds]`, derived
+  from the source id, to that source's due time so a large registry spreads its
+  polls instead of firing every source on the same tick. This reduces
+  thundering-herd pressure on shared upstreams while staying reproducible (no
+  randomness). The effective due time is
+  `last_scan + effective_interval + offset`, composing with both
+  `scan_interval_seconds` and `POLL_INTERVAL_SECONDS`; a manual
+  `POST /api/check` ignores jitter and scans immediately.
 - **Fetch size limits & truncation reporting**: every fetch reads at most
   `FETCH_MAX_BYTES` (default `2000000`, i.e. 2 MB, floored at `1024`) bytes, and
   each source can override that with a positive `max_bytes`. A clipped body is
@@ -89,7 +99,8 @@ actually use.
 - **Digest notifications** that batch alerts into a single grouped, severity-
   ordered summary on a configurable cadence (`off`, `digest` or `both`).
 - **Web dashboard** with an `Interval` column showing each source's cadence (or
-  the global default), an `Auth` column showing a lock/header-count indicator
+  the global default) and its jitter window when set (for example
+  `900s +0-300s`), an `Auth` column showing a lock/header-count indicator
   (never the secret values), a `Keywords` column showing a compact
   `+extra / -suppressed` count (`–` when both lists are empty), a `Health`
   column (`ok`, `N failures`, `truncated` for a clipped last scan, or
@@ -157,9 +168,9 @@ All configuration is environment based:
 | ------ | ------------------ | ----------------------------------------- |
 | GET    | `/healthz`         | Liveness / readiness probe                |
 | GET    | `/`                | HTML dashboard                            |
-| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `truncated`, `failure_count`, `breaker_until`) |
 | POST   | `/api/sources`     | Register a source (token protected)       |
-| GET    | `/api/sources/:id` | Fetch one source (incl. `extra_keywords`, `suppress_keywords`, `max_bytes`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources/:id` | Fetch one source (incl. `scan_jitter_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `truncated`, `failure_count`, `breaker_until`) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's breaker state (token protected) |
 | DELETE | `/api/sources/:id` | Remove a source (token protected)         |
@@ -187,6 +198,7 @@ Register a source. The `POST /api/sources` payload accepts:
 | `notify_channels`  | no       | Channels that receive this source's alerts: a list of `console`, `slack`, `email`, `webhook` or `all` (default `all`) |
 | `notify_webhook_url` | no     | `http(s)` URL that overrides `WEBHOOK_URL` for this source's alerts and digests |
 | `scan_interval_seconds` | no  | Positive integer override for this source's polling cadence; omitted keeps the global `POLL_INTERVAL_SECONDS` |
+| `scan_jitter_seconds` | no     | Non-negative integer window (seconds) added as a deterministic, id-derived offset to this source's due time so its polls are spread; omitted, `null` or `0` means no jitter |
 | `max_bytes`        | no       | Positive integer cap on the response body bytes read and stored for this source; omitted or `null` uses the global `FETCH_MAX_BYTES` |
 | `headers`          | no       | JSON object of header name to string value sent on every fetch (merged over the defaults; names normalized case-insensitively) |
 | `auth`             | no       | `"user:password"` HTTP Basic credentials; adds `Authorization: Basic <base64>` |
@@ -306,6 +318,33 @@ enabled sources so a 15-minute source is not throttled by an hourly global
 timer. Both the per-source value and the global default are floored at 30
 seconds. A manual `POST /api/check` ignores the intervals and scans every
 enabled source in one run.
+
+`scan_jitter_seconds` spreads a source's polls across a window so a large
+registry does not fire every source on the same tick against a shared upstream
+(statuspage, GitHub/GitLab, vendor changelog). It is a non-negative integer
+number of seconds; omitting it (or sending `null` or `0`) means no jitter and is
+byte-for-byte equivalent to the pre-feature scheduler. When set, the scheduler
+adds a deterministic offset in `[0, scan_jitter_seconds]`, computed as
+`source.id % (scan_jitter_seconds + 1)`, to the source's next due time, so the
+effective due time is `last_scan + effective_interval + offset` — composing with
+both `scan_interval_seconds` and the global `POLL_INTERVAL_SECONDS`. The offset
+is stable for a given source and jitter (never random), so schedules stay
+reproducible and testable. The scheduler wakes at the smallest effective due
+time among the enabled, non-tripped sources and does not busy-loop while a
+jittered source waits. A negative integer, a non-integer, a boolean or a
+non-numeric value is rejected with a `400` naming `scan_jitter_seconds`. A
+manual `POST /api/check` ignores jitter (and intervals) and scans every enabled
+source immediately.
+
+```sh
+# Poll every 15 minutes, but spread N sources over a 5-minute window so they
+# do not all hit the shared statuspage on the same tick.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Payments API","url":"https://status.payments.example/api/v2/incidents.json",
+       "kind":"statuspage","api_name":"Payments","tracked_versions":["v1"],
+       "scan_interval_seconds":900,"scan_jitter_seconds":300}'
+```
 
 `max_bytes` caps how much of a response body is read and stored for one source.
 It is a positive integer number of bytes; omitting it (or sending `null`) uses

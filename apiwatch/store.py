@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS sources (
     notify_channels TEXT NOT NULL DEFAULT '["all"]',
     notify_webhook_url TEXT,
     scan_interval_seconds INTEGER,
+    scan_jitter_seconds INTEGER,
     max_bytes INTEGER,
     headers TEXT,
     auth TEXT,
@@ -126,6 +127,11 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE sources ADD COLUMN scan_interval_seconds INTEGER"
             )
+        if "scan_jitter_seconds" not in source_columns:
+            # Old rows keep ``NULL`` (read back as no jitter, i.e. the default).
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN scan_jitter_seconds INTEGER"
+            )
         if "notify_webhook_url" not in source_columns:
             # Old rows keep ``NULL`` so they keep using the global webhook URL.
             self._conn.execute(
@@ -197,10 +203,11 @@ class Store:
                 """INSERT INTO sources
                    (name, url, kind, api_name, tracked_versions, enabled, selector,
                     min_severity, notify_channels, notify_webhook_url,
-                    scan_interval_seconds, max_bytes, headers, auth,
+                    scan_interval_seconds, scan_jitter_seconds, max_bytes,
+                    headers, auth,
                     extra_keywords, suppress_keywords, failure_count,
                     breaker_until, truncated, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -213,6 +220,7 @@ class Store:
                     json.dumps(source.notify_channels),
                     source.notify_webhook_url,
                     source.scan_interval_seconds,
+                    source.scan_jitter_seconds,
                     source.max_bytes,
                     json.dumps(source.headers or {}),
                     source.auth,
@@ -562,6 +570,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         notify_channels=json.loads(row["notify_channels"] or '["all"]'),
         notify_webhook_url=row["notify_webhook_url"],
         scan_interval_seconds=row["scan_interval_seconds"],
+        scan_jitter_seconds=row["scan_jitter_seconds"],
         max_bytes=row["max_bytes"],
         headers=json.loads(row["headers"] or "{}"),
         auth=row["auth"],
