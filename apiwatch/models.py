@@ -55,6 +55,7 @@ class Source:
     notify_channels: List[str] = field(default_factory=lambda: [ALL_CHANNELS])
     notify_webhook_url: Optional[str] = None
     scan_interval_seconds: Optional[int] = None
+    max_bytes: Optional[int] = None
     headers: Dict[str, str] = field(default_factory=dict)
     auth: Optional[str] = None
     extra_keywords: List[str] = field(default_factory=list)
@@ -63,6 +64,7 @@ class Source:
     created_at: Optional[str] = None
     failure_count: int = 0
     breaker_until: Optional[str] = None
+    truncated: bool = False
 
     def __post_init__(self) -> None:
         if self.min_severity not in SEVERITIES:
@@ -79,6 +81,12 @@ class Source:
             # ``bool`` is an ``int`` subclass but is not a meaningful interval.
             if isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0:
                 raise ValueError("scan_interval_seconds must be a positive integer")
+        limit = self.max_bytes
+        if limit is not None:
+            # ``bool`` is an ``int`` subclass but is not a meaningful byte cap.
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+                raise ValueError("max_bytes must be a positive integer")
+        self.truncated = bool(self.truncated)
         channels = self.notify_channels
         if channels is None:
             channels = [ALL_CHANNELS]
@@ -185,12 +193,14 @@ class Source:
             "notify_channels": list(self.notify_channels),
             "notify_webhook_url": self.notify_webhook_url,
             "scan_interval_seconds": self.scan_interval_seconds,
+            "max_bytes": self.max_bytes,
             "headers": dict(self.headers),
             "auth": self.auth,
             "extra_keywords": list(self.extra_keywords),
             "suppress_keywords": list(self.suppress_keywords),
             "failure_count": self.failure_count,
             "breaker_until": self.breaker_until,
+            "truncated": self.truncated,
             "created_at": self.created_at,
         }
 

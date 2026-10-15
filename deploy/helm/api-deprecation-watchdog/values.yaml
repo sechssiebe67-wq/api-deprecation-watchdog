@@ -75,6 +75,9 @@ persistence:
 config:
   pollIntervalSeconds: 3600
   fetchTimeoutSeconds: 20
+  # Maximum response body bytes read and stored per fetch (floored at 1024).
+  # Per-source `max_bytes` overrides it.
+  fetchMaxBytes: 2000000
   disableScheduler: false
   seedSources: true
   logLevel: INFO

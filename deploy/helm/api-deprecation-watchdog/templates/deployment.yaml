@@ -46,6 +46,8 @@ spec:
               value: {{ .Values.config.pollIntervalSeconds | quote }}
             - name: FETCH_TIMEOUT_SECONDS
               value: {{ .Values.config.fetchTimeoutSeconds | quote }}
+            - name: FETCH_MAX_BYTES
+              value: {{ .Values.config.fetchMaxBytes | quote }}
             - name: DISABLE_SCHEDULER
               value: {{ .Values.config.disableScheduler | quote }}
             - name: SEED_SOURCES

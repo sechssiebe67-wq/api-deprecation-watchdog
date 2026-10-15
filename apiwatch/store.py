@@ -27,12 +27,14 @@ CREATE TABLE IF NOT EXISTS sources (
     notify_channels TEXT NOT NULL DEFAULT '["all"]',
     notify_webhook_url TEXT,
     scan_interval_seconds INTEGER,
+    max_bytes INTEGER,
     headers TEXT,
     auth TEXT,
     extra_keywords TEXT NOT NULL DEFAULT '[]',
     suppress_keywords TEXT NOT NULL DEFAULT '[]',
     failure_count INTEGER NOT NULL DEFAULT 0,
     breaker_until TEXT,
+    truncated INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 
@@ -152,6 +154,17 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE sources ADD COLUMN breaker_until TEXT"
             )
+        if "max_bytes" not in source_columns:
+            # Old rows keep ``NULL`` so they fall back to ``FETCH_MAX_BYTES``.
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN max_bytes INTEGER"
+            )
+        if "truncated" not in source_columns:
+            # Old rows default to ``0`` (their last scan was not clipped).
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN truncated "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
 
         alert_columns = {
             row["name"]
@@ -184,9 +197,10 @@ class Store:
                 """INSERT INTO sources
                    (name, url, kind, api_name, tracked_versions, enabled, selector,
                     min_severity, notify_channels, notify_webhook_url,
-                    scan_interval_seconds, headers, auth, extra_keywords,
-                    suppress_keywords, failure_count, breaker_until, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    scan_interval_seconds, max_bytes, headers, auth,
+                    extra_keywords, suppress_keywords, failure_count,
+                    breaker_until, truncated, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -199,12 +213,14 @@ class Store:
                     json.dumps(source.notify_channels),
                     source.notify_webhook_url,
                     source.scan_interval_seconds,
+                    source.max_bytes,
                     json.dumps(source.headers or {}),
                     source.auth,
                     json.dumps(source.extra_keywords or []),
                     json.dumps(source.suppress_keywords or []),
                     source.failure_count,
                     source.breaker_until,
+                    1 if source.truncated else 0,
                     _now(),
                 ),
             )
@@ -253,6 +269,15 @@ class Store:
                 "UPDATE sources SET failure_count = 0, breaker_until = NULL "
                 "WHERE id = ?",
                 (source_id,),
+            )
+            self._conn.commit()
+
+    def record_source_truncation(self, source_id: int, truncated: bool) -> None:
+        """Remember whether a source's most recent response body was clipped."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sources SET truncated = ? WHERE id = ?",
+                (1 if truncated else 0, source_id),
             )
             self._conn.commit()
 
@@ -487,6 +512,9 @@ class Store:
                 "WHERE breaker_until IS NOT NULL AND breaker_until > ?",
                 (_now(),),
             ).fetchone()[0]
+            truncated = self._conn.execute(
+                "SELECT COUNT(*) FROM sources WHERE truncated = 1"
+            ).fetchone()[0]
             entries = self._conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
             alerts = self._conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
             critical = self._conn.execute(
@@ -506,6 +534,7 @@ class Store:
             "sources": sources,
             "sources_enabled": enabled,
             "sources_tripped": tripped,
+            "sources_truncated": truncated,
             "entries": entries,
             "alerts": alerts,
             "alerts_critical": critical,
@@ -533,6 +562,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         notify_channels=json.loads(row["notify_channels"] or '["all"]'),
         notify_webhook_url=row["notify_webhook_url"],
         scan_interval_seconds=row["scan_interval_seconds"],
+        max_bytes=row["max_bytes"],
         headers=json.loads(row["headers"] or "{}"),
         auth=row["auth"],
         extra_keywords=json.loads(row["extra_keywords"] or "[]"),
@@ -540,6 +570,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         created_at=row["created_at"],
         failure_count=int(row["failure_count"] or 0),
         breaker_until=row["breaker_until"],
+        truncated=bool(row["truncated"]),
     )
 
 

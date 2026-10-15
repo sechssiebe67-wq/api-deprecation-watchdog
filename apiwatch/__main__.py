@@ -60,6 +60,7 @@ def build_app(config: Config = None):
         digest_max_alerts=config.digest_max_alerts,
         breaker_threshold=config.breaker_threshold,
         breaker_cooldown_seconds=config.breaker_cooldown_seconds,
+        fetch_max_bytes=config.fetch_max_bytes,
     )
     server = create_server(store, engine, config)
     return config, store, engine, server

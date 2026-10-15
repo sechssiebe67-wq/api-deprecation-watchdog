@@ -125,6 +125,14 @@ heterogeneous noise into a single prioritized alert stream.
   per-source value and the global default are floored at 30 seconds to avoid
   hammering a source. A manual `POST /api/check` (and `Engine.scan_all()`)
   deliberately ignores the intervals and scans every enabled source.
+- **Per-source fetch size limits:** each fetch reads at most
+  `FETCH_MAX_BYTES` (default `2000000`, i.e. 2 MB, floored at `1024`) bytes of a
+  response body, and every source may override that with a positive `max_bytes`.
+  When a body is clipped the engine records the truncation, logs a warning and
+  still parses the partial body so a large feed degrades gracefully instead of
+  being dropped or tripping the circuit breaker; the signal is surfaced as
+  `sources_truncated` in `GET /api/stats` and as a `truncated` badge in the
+  dashboard's `Health` column.
 - **Per-source request headers and basic auth:** every source optionally carries
   a `headers` object (a JSON map of header name to value) and an `auth`
   convenience field (`"user:password"`). The fetcher merges the custom headers
@@ -151,13 +159,15 @@ heterogeneous noise into a single prioritized alert stream.
   fields are returned by `GET /api/sources` and `GET /api/sources/:id` and
   summarised by `sources_tripped` in `GET /api/stats`.
 - **Persistence:** SQLite store with de-duplication by content hash, so the same
-  announcement is only alerted once. The source table stores
-  `scan_interval_seconds`, `headers` (JSON text), `auth` (text),
+  announcement is only alerted once.   The source table stores
+  `scan_interval_seconds`, `max_bytes` (integer or `NULL`), `headers` (JSON
+  text), `auth` (text),
   `extra_keywords` and `suppress_keywords` (JSON text),
-  `failure_count` (integer, default `0`) and `breaker_until` (text), and a
+  `failure_count` (integer, default `0`), `breaker_until` (text) and
+  `truncated` (integer, default `0`), and a
   lightweight migration adds each column to databases created before it existed,
   leaving old rows at `NULL`/empty/`0` (read back as `{}` / `None` / `[]` /
-  `0` / `None`).
+  `0` / `None` / `false`).
 - **Per-source history API:** each source's recorded entries are browsable
   newest-first through `GET /api/sources/:id/entries` (optional `?limit=`,
   default `100`), so the stored history of one dependency can be inspected
@@ -225,8 +235,8 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `max_bytes`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `max_bytes`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
 | GET    | `/api/sources/:id`| Fetch one source (incl. breaker fields)   |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's `failure_count` and `breaker_until` (token protected) |
@@ -391,6 +401,40 @@ The breaker state is part of the source JSON: `failure_count` (integer) and
 future. The dashboard renders a `Health` column (`ok`, `N failures` or
 `tripped until <time>`) and offers a `Reset` action for tripped sources without
 ever exposing header values or credentials.
+
+## Fetch size limits
+
+A multi-megabyte JSON changelog, a statuspage bundle or a runaway OpenAPI
+document must not be able to exhaust memory or bloat the SQLite file. Every
+fetch therefore reads at most a configurable number of bytes:
+
+- `FETCH_MAX_BYTES` is the deployment-wide cap (positive integer, default
+  `2000000`, i.e. 2 MB, floored at `1024`). A non-numeric value falls back to
+  the default with a warning instead of crashing at startup.
+- The optional per-source `max_bytes` overrides the global cap for one
+  dependency. It is a positive integer or `null`/omitted; `0`, negatives,
+  booleans, floats and strings are rejected with a `400` naming `max_bytes`.
+
+The fetcher reads at most the effective cap and returns whether the body was
+truncated. When the response advertises a `Content-Length` larger than the cap
+the fetch fails with a `FetchError` unless the caller explicitly opts in, so a
+hostile feed is refused rather than silently clipped. The engine always opts in:
+when a body is clipped it still parses the partial body so a large feed degrades
+gracefully, logs a warning and records the truncation on the `ScanResult`
+(`sources_truncated` and `truncated_sources`) *without* incrementing
+`failure_count` or tripping the circuit breaker. The last scan's truncation is
+persisted per source and never stores or renders the raw body. It is surfaced
+as `sources_truncated` in `GET /api/stats` and as a compact `truncated` badge in
+the dashboard's `Health` column; the per-source `truncated` boolean and the
+effective `max_bytes` are also part of the source JSON.
+
+```sh
+# Cap one noisy feed at 512 KB even though the deployment default is larger.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Huge changelog","url":"https://api.acme.com/changelog.json",
+       "kind":"json","api_name":"Acme","max_bytes":524288}'
+```
 
 ## Routing
 
@@ -603,6 +647,12 @@ without forking the service and a noisy term can be silenced without losing the
 rest of the vocabulary. Both lists default to `[]`, preserving the legacy
 behaviour exactly. This is the next increment on top of the relevance engine and
 advances the *Smarter relevance* item below.
+
+*Shipped:* **per-source fetch size limits** (see *Current capabilities* and
+*Fetch size limits*) — a deployment-wide `FETCH_MAX_BYTES` and an optional
+per-source `max_bytes` cap how much of each response body is read and stored,
+the engine parses a clipped body gracefully instead of dropping it or tripping
+the breaker, and the `truncated` signal reaches the API, stats and dashboard.
 
 1. **More source adapters:** additional structured feeds beyond the shipped
    GitHub and GitLab releases and OpenAPI adapters. *Partially shipped:*

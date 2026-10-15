@@ -179,13 +179,14 @@ class FetcherTests(unittest.TestCase):
             return _FakeResponse()
 
         with mock.patch("apiwatch.fetcher.urlopen", side_effect=fake_urlopen):
-            body = fetcher.fetch(
+            body, truncated = fetcher.fetch(
                 "https://x.test/feed",
                 headers={"X-Api-Key": "secret", "Accept": "application/json"},
                 auth="user:pass",
             )
 
         self.assertEqual(body, "ok")
+        self.assertFalse(truncated)
         self.assertEqual(captured["headers"]["user-agent"], "UA/1")
         self.assertEqual(captured["headers"]["accept"], "application/json")
         self.assertEqual(captured["headers"]["x-api-key"], "secret")
