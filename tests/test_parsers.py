@@ -82,8 +82,75 @@ class JsonParserTests(unittest.TestCase):
         entries = parsers.parse_json(text, selector="data.releases")
         self.assertEqual([e.title for e in entries], ["A"])
 
+    def test_nested_list_selector_with_index(self):
+        text = json.dumps(
+            {"data": {"changelogs": [{"entries": [{"title": "Removed v1"}]}]}}
+        )
+        entries = parsers.parse_json(text, selector="data.changelogs.0.entries")
+        self.assertEqual([e.title for e in entries], ["Removed v1"])
+
+    def test_nested_list_selector_with_negative_index(self):
+        text = json.dumps(
+            {
+                "data": {
+                    "changelogs": [
+                        {"entries": [{"title": "Old"}]},
+                        {"entries": [{"title": "Newest"}]},
+                    ]
+                }
+            }
+        )
+        entries = parsers.parse_json(text, selector="data.changelogs.-1.entries")
+        self.assertEqual([e.title for e in entries], ["Newest"])
+
+    def test_index_selector_on_object_yields_no_entries(self):
+        text = json.dumps({"data": {"changelogs": {"entries": [{"title": "A"}]}}})
+        self.assertEqual(parsers.parse_json(text, selector="data.changelogs.0.entries"), [])
+
+    def test_out_of_range_index_yields_no_entries(self):
+        text = json.dumps({"data": {"changelogs": [{"entries": [{"title": "A"}]}]}})
+        self.assertEqual(parsers.parse_json(text, selector="data.changelogs.5.entries"), [])
+
+    def test_non_integer_index_on_list_yields_no_entries(self):
+        text = json.dumps({"data": {"changelogs": [{"entries": [{"title": "A"}]}]}})
+        self.assertEqual(parsers.parse_json(text, selector="data.changelogs.first.entries"), [])
+
     def test_invalid_json(self):
         self.assertEqual(parsers.parse_json("{nope"), [])
+
+
+class SelectorWalkerTests(unittest.TestCase):
+    def test_positive_index(self):
+        data = {"data": {"releases": [{"title": "A"}, {"title": "B"}]}}
+        self.assertEqual(
+            parsers._apply_selector(data, "data.releases.1"), {"title": "B"}
+        )
+
+    def test_negative_one_is_last(self):
+        data = {"data": {"releases": [{"title": "A"}, {"title": "B"}]}}
+        self.assertEqual(
+            parsers._apply_selector(data, "data.releases.-1"), {"title": "B"}
+        )
+
+    def test_out_of_range_returns_none(self):
+        data = {"data": {"releases": [{"title": "A"}]}}
+        self.assertIsNone(parsers._apply_selector(data, "data.releases.3"))
+        self.assertIsNone(parsers._apply_selector(data, "data.releases.-2"))
+
+    def test_non_integer_on_list_returns_none(self):
+        data = {"data": {"releases": [{"title": "A"}]}}
+        self.assertIsNone(parsers._apply_selector(data, "data.releases.first"))
+
+    def test_integer_on_dict_returns_none(self):
+        data = {"data": {"releases": {"0": {"title": "A"}}}}
+        self.assertIsNone(parsers._apply_selector(data, "data.releases.0"))
+
+    def test_unknown_key_returns_none(self):
+        self.assertIsNone(parsers._apply_selector({"a": 1}, "b"))
+
+    def test_nested_dict_and_index(self):
+        data = {"a": [{"b": [10, 20]}]}
+        self.assertEqual(parsers._apply_selector(data, "a.0.b.-1"), 20)
 
 
 STATUSPAGE = json.dumps(

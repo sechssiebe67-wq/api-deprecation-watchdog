@@ -90,6 +90,17 @@ heterogeneous noise into a single prioritized alert stream.
   `github` / `gitlab` / `openapi` sources accept a dotted path (e.g.
   `data.releases` or `versions`), so noisy pages yield the right blocks without
   code changes.
+- **Array indices in dotted selectors:** the `json`, `github`, `gitlab` and
+  `openapi` parsers accept numeric segments inside that dotted path, so a list
+  nested at a fixed position — for example
+  `{"data": {"changelogs": [{"entries": [...]}]}}` — can be addressed directly
+  with `data.changelogs.0.entries`. `0`, `1`, … index from the front and `-1`
+  addresses the last element. The walk lives in one shared helper, so all four
+  parsers get it and none grows its own copy. Invalid input degrades exactly like
+  an unknown key instead of raising: a numeric segment applied to an object, a
+  non-integer segment applied to a list, and an out-of-range (including
+  negative-into-empty) index each leave the walk with no value, so the parser
+  returns no entries and the source scans cleanly.
 - **Relevance engine:** detects deprecation / breaking-change language
   (`deprecated`, `sunset`, `end of life`, `removed`, `breaking`, …) and boosts
   entries that mention a tracked version. Classifies each hit as
@@ -208,12 +219,19 @@ heterogeneous noise into a single prioritized alert stream.
   lightweight migration adds each column to databases created before it existed,
   leaving old rows at `NULL`/empty/`0` (read back as `{}` / `None` / `[]` /
   `0` / `None` / `false`).
-- **Per-source history API:** each source's recorded entries are browsable
-  newest-first through `GET /api/sources/:id/entries` (optional `?limit=`,
-  default `100`), so the stored history of one dependency can be inspected
-  without filtering the global `/api/entries` feed. An unknown id returns `404`
-  and a non-integer id or limit returns `400`; the `/entries` suffix leaves
-  `GET` and `DELETE /api/sources/:id` unchanged.
+- **Per-source history API + pagination:** each source's recorded entries are
+  browsable newest-first through `GET /api/sources/:id/entries` (optional
+  `?limit=`, default `100`, and `?offset=`, default `0`), so the stored history
+  of one dependency can be inspected without filtering the global `/api/entries`
+  feed. The same optional `?offset=` (a non-negative integer, default `0`) is
+  accepted by the global `GET /api/entries`, composing with `?limit=`: `offset`
+  skips that many newest entries first, then `limit` caps the page, so
+  `GET /api/entries?limit=100&offset=100` walks the next page of a long-running
+  deployment's history. Omitting `offset` is byte-for-byte unchanged from before
+  pagination existed. An unknown source id returns `404`; a non-integer id or
+  limit, or an invalid `offset` (non-integer, negative or boolean), returns
+  `400` naming the offending parameter; the `/entries` suffix leaves `GET` and
+  `DELETE /api/sources/:id` unchanged.
 - **Notifications:** Slack incoming webhook, SMTP e-mail, a generic JSON
   webhook and a console channel; channels are optional and enabled through
   configuration. The `webhook` channel POSTs a dependency-free JSON payload to
@@ -286,11 +304,11 @@ heterogeneous noise into a single prioritized alert stream.
 | GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `alert_cooldown_seconds`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
 | POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `alert_cooldown_seconds`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
 | GET    | `/api/sources/:id`| Fetch one source (incl. `alert_cooldown_seconds`, `scan_jitter_seconds` and breaker fields) |
-| GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
+| GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`, `?offset=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's `failure_count` and `breaker_until` (token protected) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
 | GET    | `/api/alerts`     | List alerts, newest first                 |
-| GET    | `/api/entries`    | List parsed changelog entries             |
+| GET    | `/api/entries`    | List parsed changelog entries (`?limit=`, `?offset=`, `?source_id=`) |
 | GET    | `/api/digests`    | List digests, newest first (`?limit=`)    |
 | GET    | `/api/digests/:id`| Fetch one digest (`404` when unknown)     |
 | POST   | `/api/digest/flush`| Build and deliver a digest (token protected) |
@@ -348,6 +366,8 @@ change. It means different things per kind:
   - `#changelog` → only the blocks nested inside `id="changelog"`.
 - **`json`** – a dotted path into the document.
   - `data.releases` → walk `data` then `releases` before collecting entries.
+  - `data.changelogs.0.entries` → walk `data`, take the first element of the
+    `changelogs` list, then collect its `entries`.
 - **`github`** – the same dotted path syntax, useful for wrapped API payloads.
   - `data.releases` → walk `data` then `releases` before collecting entries.
 - **`gitlab`** – the same dotted path syntax, useful for wrapped API payloads.
@@ -358,6 +378,14 @@ change. It means different things per kind:
   document is treated as one spec and diffed against the empty spec, so a
   first registration reports the whole surface as `info` entries.
   - `versions` → walk the top-level `versions` array of spec objects.
+
+For every dotted path, a segment that is a non-negative integer indexes a list
+(`0` is the first element) and `-1` addresses the last element, so a list nested
+at a fixed position can be reached — for example `data.changelogs.0.entries`.
+Invalid segments degrade gracefully and never raise: a numeric segment applied to
+an object, a non-integer segment applied to a list, and an out-of-range index
+(including `-1` against an empty list) all yield no value, so the parser returns
+no entries exactly as it does for an unknown key.
 
 Every source also accepts an optional `min_severity` (`critical`, `warning` or
 `info`, default `info`). An entry is only turned into an alert when its severity
@@ -859,6 +887,19 @@ stored with `notified = 0` and are summarised by the next digest, so persistence
 and alerting remain separate. This directly advances the *low noise / smarter
 relevance* goal: a re-announced deprecation no longer floods Slack, e-mail or
 the webhook channel with duplicates.
+
+*Shipped:* **array-index selectors and entry pagination** (see *Current
+capabilities* and *Selector syntax*) — numeric segments (`0`, `1`, … and `-1`
+for the last element) in the dotted `json`/`github`/`gitlab`/`openapi` selector,
+implemented in one shared walker and degrading to no entries for invalid input,
+plus an optional `?offset=` (non-negative, default `0`) on `GET /api/entries`
+and `GET /api/sources/:id/entries` that composes with `?limit=`. The default,
+offset-free pages are byte-for-byte unchanged.
+
+**Follow-ups this unlocks (not yet shipped):** the pagination primitive is in
+place but the dashboard has no "load more" affordance yet, and `GET /api/export`
+still exposes only `?limit=` and returns the newest page with no `offset`. Those
+remain explicit next steps rather than shipped behaviour.
 
 1. **More source adapters:** additional structured feeds beyond the shipped
    GitHub and GitLab releases and OpenAPI adapters. *Partially shipped:*

@@ -382,32 +382,47 @@ class Store:
             ).fetchone()
         return _row_to_entry(row) if row else None
 
-    def list_entries(self, limit: int = 100, source_id: Optional[int] = None) -> List[Entry]:
+    def list_entries(
+        self,
+        limit: int = 100,
+        source_id: Optional[int] = None,
+        offset: int = 0,
+    ) -> List[Entry]:
+        """Return entries newest first, skipping the first ``offset`` of them.
+
+        ``offset`` defaults to ``0``, so callers that omit it see exactly the
+        pre-pagination result. It composes with ``limit``: ``offset`` entries are
+        skipped before the page is capped.
+        """
         query = "SELECT * FROM entries"
         params: tuple = ()
         if source_id is not None:
             query += " WHERE source_id = ?"
             params = (source_id,)
-        query += " ORDER BY id DESC LIMIT ?"
-        params += (limit,)
+        query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+        params += (limit, offset)
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
         return [_row_to_entry(row) for row in rows]
 
-    def list_entries_for_source(self, source_id: int, limit: int = 100) -> List[Entry]:
+    def list_entries_for_source(
+        self, source_id: int, limit: int = 100, offset: int = 0
+    ) -> List[Entry]:
         """Return one source's entries, newest first by ``created_at``.
 
         Ties on ``created_at`` (which has second resolution) are broken by ``id``
         descending, so the order is deterministic. An unknown source id simply
         yields an empty list; the HTTP layer decides whether that is a ``404``.
+        The optional ``offset`` skips that many newest entries before ``limit``
+        caps the page; it defaults to ``0`` and preserves the previous result.
         """
         with self._lock:
             rows = self._conn.execute(
                 """SELECT * FROM entries
                    WHERE source_id = ?
                    ORDER BY created_at DESC, id DESC
-                   LIMIT ?""",
-                (source_id, limit),
+                   LIMIT ? OFFSET ?""",
+                (source_id, limit, offset),
             ).fetchall()
         return [_row_to_entry(row) for row in rows]
 

@@ -9,7 +9,7 @@ from apiwatch.config import Config
 from apiwatch.engine import Engine
 from apiwatch.fetcher import FakeFetcher
 from apiwatch.models import Alert, Digest, Entry
-from apiwatch.store import Store
+from apiwatch.store import Store, _row_to_entry
 
 FEED_URL = "https://example.com/feed"
 RSS = """<?xml version="1.0"?>
@@ -760,6 +760,114 @@ class OpenAppTests(AppTestCase):
         )
         self.assertEqual(status, 400)
         self.assertIn("webhook", json.loads(body)["error"])
+
+    def _seed_entries(self, titles=("first", "second", "third", "fourth")):
+        _, body = self.request(
+            "POST", "/api/sources", {"name": "Example", "url": FEED_URL, "kind": "rss"}
+        )
+        source_id = json.loads(body)["id"]
+        for title in titles:
+            self.store.save_entry(
+                Entry(source_id=source_id, title=title, body="", fingerprint=title)
+            )
+        return source_id
+
+    def test_entries_offset_pages_the_feed(self):
+        self._seed_entries(("first", "second", "third", "fourth"))
+        status, body = self.request("GET", "/api/entries?limit=2&offset=2")
+        self.assertEqual(status, 200)
+        titles = [e["title"] for e in json.loads(body)["entries"]]
+        self.assertEqual(titles, ["second", "first"])
+
+    def test_entries_offset_composes_with_limit(self):
+        self._seed_entries(("first", "second", "third", "fourth"))
+        status, body = self.request("GET", "/api/entries?limit=1&offset=1")
+        self.assertEqual(status, 200)
+        self.assertEqual([e["title"] for e in json.loads(body)["entries"]], ["third"])
+
+    def test_entries_offset_past_end_is_empty(self):
+        self._seed_entries(("first", "second"))
+        status, body = self.request("GET", "/api/entries?limit=100&offset=100000")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"entries": []})
+
+    def test_entries_invalid_offset_rejected(self):
+        for value in ("-1", "abc", "true"):
+            status, body = self.request("GET", "/api/entries?offset=%s" % value)
+            self.assertEqual(status, 400, value)
+            self.assertIn("offset", json.loads(body)["error"])
+
+    def test_entries_without_offset_matches_offset_zero(self):
+        self._seed_entries(("first", "second", "third"))
+        status_default, body_default = self.request("GET", "/api/entries")
+        status_zero, body_zero = self.request("GET", "/api/entries?offset=0")
+        self.assertEqual(status_default, 200)
+        self.assertEqual(status_zero, 200)
+        self.assertEqual(body_default, body_zero)
+        self.assertEqual(
+            [e["title"] for e in json.loads(body_default)["entries"]],
+            ["third", "second", "first"],
+        )
+
+    def test_entries_without_offset_is_byte_identical_to_pre_pagination(self):
+        self._seed_entries(("first", "second", "third"))
+        status, body = self.request("GET", "/api/entries")
+        self.assertEqual(status, 200)
+        # The pre-pagination endpoint ran exactly this query; reproduce its
+        # payload and assert the response is byte-for-byte identical.
+        legacy_rows = self.store._conn.execute(
+            "SELECT * FROM entries ORDER BY id DESC LIMIT ?", (100,)
+        ).fetchall()
+        legacy = [_row_to_entry(row).to_dict() for row in legacy_rows]
+        expected = json.dumps({"entries": legacy}, ensure_ascii=False)
+        self.assertEqual(body, expected)
+
+    def test_source_entries_without_offset_is_byte_identical_to_pre_pagination(self):
+        source_id = self._seed_entries(("first", "second", "third"))
+        status, body = self.request("GET", "/api/sources/%d/entries" % source_id)
+        self.assertEqual(status, 200)
+        # The pre-pagination endpoint ran exactly this query; reproduce its
+        # payload and assert the response is byte-for-byte identical.
+        legacy_rows = self.store._conn.execute(
+            """SELECT * FROM entries
+               WHERE source_id = ?
+               ORDER BY created_at DESC, id DESC
+               LIMIT ?""",
+            (source_id, 100),
+        ).fetchall()
+        legacy = [_row_to_entry(row).to_dict() for row in legacy_rows]
+        expected = json.dumps({"entries": legacy}, ensure_ascii=False)
+        self.assertEqual(body, expected)
+
+    def test_source_entries_offset_pages(self):
+        source_id = self._seed_entries(("first", "second", "third", "fourth"))
+        status, body = self.request(
+            "GET", "/api/sources/%d/entries?limit=2&offset=2" % source_id
+        )
+        self.assertEqual(status, 200)
+        titles = [e["title"] for e in json.loads(body)["entries"]]
+        self.assertEqual(titles, ["second", "first"])
+
+    def test_source_entries_offset_past_end_is_empty(self):
+        source_id = self._seed_entries(("first", "second"))
+        status, body = self.request(
+            "GET", "/api/sources/%d/entries?limit=100&offset=100000" % source_id
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"entries": []})
+
+    def test_source_entries_invalid_offset_rejected(self):
+        source_id = self._seed_entries(("first",))
+        status, body = self.request(
+            "GET", "/api/sources/%d/entries?offset=-1" % source_id
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("offset", json.loads(body)["error"])
+
+    def test_source_entries_unknown_source_with_offset(self):
+        status, body = self.request("GET", "/api/sources/999999/entries?offset=1")
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body)["error"], "source not found")
 
 
 class ExportTests(AppTestCase):

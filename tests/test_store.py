@@ -43,6 +43,36 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.list_entries(), [])
         self.assertEqual(self.store.list_alerts(), [])
 
+    def test_list_entries_offset_skips_newest(self):
+        source = self.store.add_source(self._source())
+        for title in ("first", "second", "third", "fourth"):
+            self.store.save_entry(
+                Entry(source_id=source.id, title=title, body="", fingerprint=title)
+            )
+        all_titles = [e.title for e in self.store.list_entries()]
+        self.assertEqual(all_titles, ["fourth", "third", "second", "first"])
+        page = self.store.list_entries(limit=2, offset=2)
+        self.assertEqual([e.title for e in page], ["second", "first"])
+        self.assertEqual(
+            [e.title for e in self.store.list_entries(limit=2, offset=0)],
+            ["fourth", "third"],
+        )
+        self.assertEqual(self.store.list_entries(limit=2, offset=100), [])
+
+    def test_list_entries_for_source_offset(self):
+        source = self.store.add_source(self._source())
+        other = self.store.add_source(self._source(name="Other", url="https://other/feed"))
+        for title in ("first", "second", "third"):
+            self.store.save_entry(
+                Entry(source_id=source.id, title=title, body="", fingerprint=title)
+            )
+        self.store.save_entry(
+            Entry(source_id=other.id, title="noise", body="", fingerprint="noise")
+        )
+        page = self.store.list_entries_for_source(source.id, limit=1, offset=1)
+        self.assertEqual([e.title for e in page], ["second"])
+        self.assertEqual(self.store.list_entries_for_source(source.id, offset=100), [])
+
     def test_entry_deduplication(self):
         source = self.store.add_source(self._source())
         first = self.store.save_entry(

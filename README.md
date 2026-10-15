@@ -34,7 +34,11 @@ actually use.
   derived from the kind of change rather than from changelog prose.
 - **Per-source selectors** for precise extraction: a CSS-like selector for
   `html` (`h2.deprecation`, `#changelog`) and a dotted path for `json`,
-  `github`, `gitlab` and `openapi` (`data.releases`, `versions`).
+  `github`, `gitlab` and `openapi` (`data.releases`, `versions`). Dotted paths
+  also accept array indices — `0`, `1`, … from the front and `-1` for the last
+  element — so a list nested at a fixed position is reachable
+  (`data.changelogs.0.entries`); invalid segments yield no entries instead of
+  raising.
 - **Relevance engine** that detects deprecation / breaking-change language and
   boosts entries referencing tracked versions; classifies hits as `critical`,
   `warning` or `info` (the severity ladder, highest to lowest).
@@ -184,11 +188,11 @@ All configuration is environment based:
 | GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
 | POST   | `/api/sources`     | Register a source (token protected)       |
 | GET    | `/api/sources/:id` | Fetch one source (incl. `scan_jitter_seconds`, `alert_cooldown_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
-| GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
+| GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`, `?offset=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's breaker state (token protected) |
 | DELETE | `/api/sources/:id` | Remove a source (token protected)         |
 | GET    | `/api/alerts`      | List alerts (`?limit=`, `?severity=`)     |
-| GET    | `/api/entries`     | List parsed entries (`?source_id=`)       |
+| GET    | `/api/entries`     | List parsed entries (`?source_id=`, `?limit=`, `?offset=`) |
 | GET    | `/api/digests`     | List digests, newest first (`?limit=`)    |
 | GET    | `/api/digests/:id` | Fetch one digest (`404` when unknown)     |
 | GET    | `/api/stats`       | Aggregate counters (incl. `sources_tripped` and `alerts_suppressed`) |
@@ -225,7 +229,14 @@ For `html`, `selector` is a CSS-like simple selector (optional tag, `#id`,
 `.class`, or a combination). It matches a block when the block or an ancestor
 satisfies it, so `#changelog` scopes extraction to that container. For `json`,
 `github`, `gitlab` and `openapi`, `selector` is a dotted path such as
-`data.releases` or `versions`.
+`data.releases` or `versions`. A segment that is a non-negative integer indexes
+a list (`0` is the first element) and `-1` addresses the last element, so a list
+nested at a fixed position can be reached — for example
+`data.changelogs.0.entries` against
+`{"data": {"changelogs": [{"entries": [...]}]}}`. Invalid segments never raise
+and yield no entries, exactly like an unknown key: a numeric segment applied to
+an object, a non-integer segment applied to a list, and an out-of-range index
+(including `-1` against an empty list) all produce an empty result.
 
 For `github` sources, `url` may be either the releases REST API URL
 (`https://api.github.com/repos/<owner>/<repo>/releases`) or the repository HTML
@@ -457,15 +468,46 @@ curl -X POST http://localhost:8080/api/sources \
 
 `GET /api/sources/:id/entries` returns the entries recorded for one source,
 newest first (ordered by `created_at` then `id`, both descending) and capped by
-the optional `?limit=` query parameter (default `100`). An unknown `:id` returns
-`404 {"error": "source not found"}`, while a non-integer `:id` or `?limit=`
-returns `400 {"error": "invalid id"}` or `{"error": "invalid limit"}`
-respectively. The route matches the `/entries` suffix, so `GET` and
-`DELETE /api/sources/:id` are unchanged.
+the optional `?limit=` query parameter (default `100`). The optional `?offset=`
+query parameter (a non-negative integer, default `0`) skips that many newest
+entries before `limit` is applied, so the history can be paged. An unknown `:id`
+returns `404 {"error": "source not found"}`, while a non-integer `:id` or
+`?limit=` returns `400 {"error": "invalid id"}` or `{"error": "invalid limit"}`
+respectively and an invalid `?offset=` (non-integer, negative or boolean)
+returns `400 {"error": "invalid offset"}`. The route matches the `/entries`
+suffix, so `GET` and `DELETE /api/sources/:id` are unchanged.
 
 ```sh
 # The stored history for source 1, newest first, at most 20 entries.
 curl "http://localhost:8080/api/sources/1/entries?limit=20"
+
+# Page further back: skip the 20 newest, return the next 20.
+curl "http://localhost:8080/api/sources/1/entries?limit=20&offset=20"
+```
+
+### Paging the entry feed
+
+`GET /api/entries` accepts the same `?limit=` (default `100`) and `?offset=`
+(default `0`) pair as the per-source route, plus `?source_id=` to filter to one
+dependency. Omitting `offset` returns exactly the same page as before pagination
+existed. Combine `limit` and `offset` to walk the whole history of a
+long-running deployment, which may hold thousands of entries:
+
+```sh
+# Page 1: the 100 newest entries.
+curl "http://localhost:8080/api/entries?limit=100"
+
+# Page 2: the next 100 newest entries.
+curl "http://localhost:8080/api/entries?limit=100&offset=100"
+
+# Page 3, and an offset past the end returns an empty list with status 200.
+curl "http://localhost:8080/api/entries?limit=100&offset=200"
+curl "http://localhost:8080/api/entries?limit=100&offset=100000"
+# -> {"entries": []}
+
+# An invalid offset is rejected with 400 naming the parameter.
+curl "http://localhost:8080/api/entries?offset=-1"
+# -> {"error": "invalid offset"}
 ```
 
 ### Export
