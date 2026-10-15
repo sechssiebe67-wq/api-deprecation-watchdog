@@ -70,19 +70,20 @@ def render_dashboard(
     if sources:
         source_rows = "".join(
             "<tr><td>%s</td><td><code>%s</code></td><td class=\"col-hide\">%s</td>"
-            "<td class=\"col-hide\">%s</td><td>%s</td><td>%s</td></tr>"
+            "<td class=\"col-hide\">%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
             % (
                 _esc(source.name),
                 _esc(source.kind),
                 _esc(source.api_name),
                 _esc(", ".join(source.tracked_versions)),
                 _badge(source.min_severity),
+                _esc(", ".join(source.notify_channels)),
                 _esc("enabled" if source.enabled else "disabled"),
             )
             for source in sources
         )
     else:
-        source_rows = '<tr><td colspan="6" class="muted">No sources registered yet.</td></tr>'
+        source_rows = '<tr><td colspan="7" class="muted">No sources registered yet.</td></tr>'
 
     if alerts:
         alert_rows = ""
@@ -157,7 +158,7 @@ def render_dashboard(
   </table>
   <h2>Monitored sources</h2>
   <table>
-    <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Min severity</th><th>Status</th></tr></thead>
+    <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Min severity</th><th>Channels</th><th>Status</th></tr></thead>
     <tbody>%s</tbody>
   </table>
   <p class="muted">JSON API: <code>/api/sources</code>, <code>/api/alerts</code>, <code>/api/entries</code>, <code>/api/digests</code>, <code>/api/stats</code>, <code>/api/check</code> (POST), <code>/api/digest/flush</code> (POST).</p>

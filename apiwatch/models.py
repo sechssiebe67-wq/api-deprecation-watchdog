@@ -7,6 +7,8 @@ from typing import List, Optional
 
 SOURCE_KINDS = ("rss", "html", "json", "statuspage", "github", "openapi")
 SEVERITIES = ("critical", "warning", "info")
+NOTIFY_CHANNELS = ("console", "slack", "email")
+ALL_CHANNELS = "all"
 
 
 @dataclass
@@ -19,12 +21,33 @@ class Source:
     enabled: bool = True
     selector: Optional[str] = None
     min_severity: str = "info"
+    notify_channels: List[str] = field(default_factory=lambda: [ALL_CHANNELS])
     id: Optional[int] = None
     created_at: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.min_severity not in SEVERITIES:
             raise ValueError("min_severity must be one of %s" % ", ".join(SEVERITIES))
+        channels = self.notify_channels
+        if channels is None:
+            channels = [ALL_CHANNELS]
+        if not isinstance(channels, (list, tuple)):
+            raise ValueError("notify_channels must be a list of channel names")
+        normalized: List[str] = []
+        for channel in channels:
+            if not isinstance(channel, str):
+                raise ValueError("notify_channels must be a list of channel names")
+            channel = channel.strip().lower()
+            if channel != ALL_CHANNELS and channel not in NOTIFY_CHANNELS:
+                raise ValueError(
+                    "notify_channels entries must be one of %s or 'all'"
+                    % ", ".join(NOTIFY_CHANNELS)
+                )
+            if channel not in normalized:
+                normalized.append(channel)
+        # An empty list means "all channels"; normalising it keeps the stored
+        # value and the dashboard unambiguous.
+        self.notify_channels = normalized or [ALL_CHANNELS]
 
     def to_dict(self) -> dict:
         return {
@@ -37,6 +60,7 @@ class Source:
             "enabled": self.enabled,
             "selector": self.selector,
             "min_severity": self.min_severity,
+            "notify_channels": list(self.notify_channels),
             "created_at": self.created_at,
         }
 

@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS sources (
     enabled INTEGER NOT NULL DEFAULT 1,
     selector TEXT,
     min_severity TEXT NOT NULL DEFAULT 'info',
+    notify_channels TEXT NOT NULL DEFAULT '["all"]',
     created_at TEXT NOT NULL
 );
 
@@ -105,6 +106,11 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE sources ADD COLUMN min_severity TEXT NOT NULL DEFAULT 'info'"
             )
+        if "notify_channels" not in source_columns:
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN notify_channels "
+                "TEXT NOT NULL DEFAULT '[\"all\"]'"
+            )
 
         alert_columns = {
             row["name"]
@@ -136,8 +142,8 @@ class Store:
             cur = self._conn.execute(
                 """INSERT INTO sources
                    (name, url, kind, api_name, tracked_versions, enabled, selector,
-                    min_severity, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    min_severity, notify_channels, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -147,6 +153,7 @@ class Store:
                     1 if source.enabled else 0,
                     source.selector,
                     source.min_severity,
+                    json.dumps(source.notify_channels),
                     _now(),
                 ),
             )
@@ -426,6 +433,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         enabled=bool(row["enabled"]),
         selector=row["selector"],
         min_severity=row["min_severity"],
+        notify_channels=json.loads(row["notify_channels"] or '["all"]'),
         created_at=row["created_at"],
     )
 

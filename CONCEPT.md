@@ -91,6 +91,16 @@ heterogeneous noise into a single prioritized alert stream.
   announcement is only alerted once.
 - **Notifications:** Slack incoming webhook, SMTP e-mail and a console channel;
   channels are optional and enabled through configuration.
+- **Per-source notification routing:** every source carries a `notify_channels`
+  list naming the notifier channels it may target (`console`, `slack`, `email`)
+  or the literal `all`. The default is `["all"]`, which preserves the original
+  fan-out to every configured notifier, so existing sources and deployments are
+  unchanged. A chatty `info`-only source can be routed to Slack only, while a
+  critical dependency can be escalated to a dedicated e-mail channel; an empty
+  list is treated as `all`. The same routing applies to digests: alerts are
+  grouped by their recipient set and each notifier receives only the alerts
+  routed to it, so a notifier with no matching alert is never invoked and a
+  routed alert stays pending until a matching notifier accepts it.
 - **Digest notifications:** an optional digest mode that buffers new alerts and
   delivers one grouped summary per digest window instead of one message per
   scan. Alerts are grouped by source, ordered by severity (critical > warning >
@@ -121,8 +131,8 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity` (token protected) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity` and `notify_channels` (token protected) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
 | GET    | `/api/alerts`     | List alerts, newest first                 |
 | GET    | `/api/entries`    | List parsed changelog entries             |
@@ -159,6 +169,27 @@ Every source also accepts an optional `min_severity` (`critical`, `warning` or
 `info`, default `info`). An entry is only turned into an alert when its severity
 ranks at or above this floor; lower-severity entries are still parsed and stored.
 
+## Routing
+
+The optional `notify_channels` field on a source selects which notifier channels
+receive its alerts. It is a list whose entries are `console`, `slack`, `email`
+or the literal `all`:
+
+- omitted or `all` (the default) → every configured notifier, the original
+  fan-out behaviour;
+- `["slack"]` → only the Slack notifier;
+- `["email"]` → only the e-mail notifier;
+- `["console", "slack"]` → the console and Slack notifiers;
+- `[]` (empty list) → treated as `all`.
+
+Unknown entries are rejected with a `400` that names the allowed values. The
+deployment-wide `NOTIFY_CHANNELS` environment variable supplies the default for
+sources that omit the field, so an operator can change the default without
+editing every source. The engine honours the field for both immediate dispatch
+and digest delivery: a notifier is only invoked when at least one alert is routed
+to it, and an alert is only marked notified once a routed notifier has accepted
+it, so routing never silently drops an alert.
+
 Example source registrations:
 
 ```sh
@@ -188,6 +219,13 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Acme API spec","url":"https://api.acme.com/openapi.json",
        "kind":"openapi","api_name":"Acme","tracked_versions":["v2"],
        "selector":"versions","min_severity":"warning"}'
+
+# Route a chatty source to Slack only; the e-mail on-call inbox stays quiet.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Acme Release Notes","url":"https://api.acme.com/changelog.json",
+       "kind":"json","api_name":"Acme","selector":"data.releases",
+       "notify_channels":["slack"]}'
 ```
 
 ## Next direction
@@ -210,11 +248,22 @@ URL, so breaking-change notes in release bodies are parsed and classified.
 empty spec) and emits one entry per structural change, with the severity
 derived from the kind of change rather than from prose.
 
+*Shipped:* **per-source notification routing** (see *Current capabilities*) — a
+`notify_channels` list on each source that targets a subset of the configured
+notifier channels, so the *Integrations* / delivery-target and *Smarter
+relevance* items below are now partially shipped: the existing channels are
+usable per dependency without adding a new external integration.
+
 1. **More source adapters:** additional structured feeds beyond the shipped
    GitHub releases and OpenAPI adapters.
 2. **Smarter relevance:** semantic matching of version ranges (semver / date
-   versions), per-team severity rules and richer keyword tuning.
+   versions), per-team severity rules and richer keyword tuning. *Partially
+   shipped:* per-source `min_severity` and `notify_channels` already let a team
+   tune the volume and destination of alerts per dependency.
 3. **Integrations:** GitHub/GitLab issues and Jira as delivery targets.
+   *Partially shipped:* per-source `notify_channels` routes alerts to the
+   existing Slack, e-mail and console channels; tracker integrations remain to
+   be built.
 4. **Multi-tenant onboarding:** organizations, API keys and shared source
    templates for the manual concierge phase.
 5. **Metrics export:** Prometheus endpoint for adoption and reliability

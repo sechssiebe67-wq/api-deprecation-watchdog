@@ -8,13 +8,13 @@ import json
 import logging
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Optional
+from typing import List, Optional
 from urllib.parse import parse_qs, urlparse
 
 from .config import Config
 from .dashboard import render_dashboard
 from .engine import Engine
-from .models import SEVERITIES, SOURCE_KINDS, Source
+from .models import ALL_CHANNELS, NOTIFY_CHANNELS, SEVERITIES, SOURCE_KINDS, Source
 from .store import Store
 
 log = logging.getLogger("apiwatch.app")
@@ -54,7 +54,9 @@ def normalize_github_url(url: str) -> str:
     return url
 
 
-def validate_source_payload(payload: dict) -> Source:
+def validate_source_payload(
+    payload: dict, default_channels: Optional[List[str]] = None
+) -> Source:
     if not isinstance(payload, dict):
         raise ApiError(400, "body must be a JSON object")
     name = (payload.get("name") or "").strip()
@@ -81,6 +83,22 @@ def validate_source_payload(payload: dict) -> Source:
         raise ApiError(
             400, "'min_severity' must be one of %s" % ", ".join(SEVERITIES)
         )
+    channels = payload.get("notify_channels")
+    if channels is None:
+        channels = list(default_channels) if default_channels else [ALL_CHANNELS]
+    if not isinstance(channels, list) or not all(
+        isinstance(channel, str) for channel in channels
+    ):
+        raise ApiError(400, "'notify_channels' must be a list of strings")
+    normalized_channels = [channel.strip().lower() for channel in channels]
+    allowed = set(NOTIFY_CHANNELS) | {ALL_CHANNELS}
+    unknown = [channel for channel in normalized_channels if channel not in allowed]
+    if unknown:
+        raise ApiError(
+            400,
+            "'notify_channels' entries must be one of %s or 'all'"
+            % ", ".join(NOTIFY_CHANNELS),
+        )
     return Source(
         name=name,
         url=url,
@@ -90,6 +108,7 @@ def validate_source_payload(payload: dict) -> Source:
         enabled=bool(payload.get("enabled", True)),
         selector=selector,
         min_severity=min_severity.strip().lower(),
+        notify_channels=normalized_channels,
     )
 
 
@@ -248,7 +267,9 @@ class WatchdogHandler(BaseHTTPRequestHandler):
     def _create_source(self) -> None:
         if not self._authorized():
             raise ApiError(401, "unauthorized")
-        source = validate_source_payload(self._read_json())
+        source = validate_source_payload(
+            self._read_json(), self.config.notify_channels
+        )
         created = self.store.add_source(source)
         self._send_json(201, created.to_dict())
 

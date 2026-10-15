@@ -50,6 +50,8 @@ spec:
               value: {{ .Values.config.disableScheduler | quote }}
             - name: SEED_SOURCES
               value: {{ .Values.config.seedSources | quote }}
+            - name: NOTIFY_CHANNELS
+              value: {{ .Values.config.notifyChannels | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.config.logLevel | quote }}
             - name: DIGEST_MODE
