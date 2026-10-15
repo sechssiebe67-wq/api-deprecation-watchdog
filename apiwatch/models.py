@@ -58,6 +58,7 @@ class Source:
     scan_jitter_seconds: Optional[int] = None
     max_bytes: Optional[int] = None
     retention_days: Optional[int] = None
+    alert_cooldown_seconds: Optional[int] = None
     headers: Dict[str, str] = field(default_factory=dict)
     auth: Optional[str] = None
     extra_keywords: List[str] = field(default_factory=list)
@@ -67,6 +68,8 @@ class Source:
     failure_count: int = 0
     breaker_until: Optional[str] = None
     truncated: bool = False
+    last_alert_at: Optional[str] = None
+    alerts_suppressed: int = 0
 
     def __post_init__(self) -> None:
         if self.min_severity not in SEVERITIES:
@@ -104,6 +107,19 @@ class Source:
             # ``bool`` is an ``int`` subclass but is not a meaningful window.
             if isinstance(retention, bool) or not isinstance(retention, int) or retention <= 0:
                 raise ValueError("retention_days must be a positive integer")
+        cooldown = self.alert_cooldown_seconds
+        if cooldown is not None:
+            # ``bool`` is an ``int`` subclass but is not a meaningful window.
+            if isinstance(cooldown, bool) or not isinstance(cooldown, int) or cooldown < 0:
+                raise ValueError(
+                    "alert_cooldown_seconds must be a non-negative integer"
+                )
+        if (
+            isinstance(self.alerts_suppressed, bool)
+            or not isinstance(self.alerts_suppressed, int)
+            or self.alerts_suppressed < 0
+        ):
+            raise ValueError("alerts_suppressed must be a non-negative integer")
         self.truncated = bool(self.truncated)
         channels = self.notify_channels
         if channels is None:
@@ -214,6 +230,7 @@ class Source:
             "scan_jitter_seconds": self.scan_jitter_seconds,
             "max_bytes": self.max_bytes,
             "retention_days": self.retention_days,
+            "alert_cooldown_seconds": self.alert_cooldown_seconds,
             "headers": dict(self.headers),
             "auth": self.auth,
             "extra_keywords": list(self.extra_keywords),

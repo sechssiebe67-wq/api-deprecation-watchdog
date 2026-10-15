@@ -35,6 +35,7 @@ class ScanResult:
     entries_seen: int = 0
     entries_new: int = 0
     alerts_created: int = 0
+    alerts_suppressed: int = 0
     alerts: List[Alert] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     truncated_sources: List[str] = field(default_factory=list)
@@ -48,6 +49,7 @@ class ScanResult:
             "entries_seen": self.entries_seen,
             "entries_new": self.entries_new,
             "alerts_created": self.alerts_created,
+            "alerts_suppressed": self.alerts_suppressed,
             "errors": list(self.errors),
             "truncated_sources": list(self.truncated_sources),
         }
@@ -235,9 +237,9 @@ class Engine:
         result.alerts = new_alerts
         if notify and new_alerts:
             if self.digest_mode == "off":
-                self.dispatch(new_alerts)
+                result.alerts_suppressed += self.dispatch(new_alerts)
             elif self.digest_mode == "both":
-                self.dispatch(new_alerts, mark=False)
+                result.alerts_suppressed += self.dispatch(new_alerts, mark=False)
             # "digest": hold the alerts back for the next digest flush.
         return result
 
@@ -255,6 +257,7 @@ class Engine:
             result.entries_seen += sub.entries_seen
             result.entries_new += sub.entries_new
             result.alerts_created += sub.alerts_created
+            result.alerts_suppressed += sub.alerts_suppressed
             result.alerts.extend(sub.alerts)
             result.errors.extend(sub.errors)
             result.truncated_sources.extend(sub.truncated_sources)
@@ -287,7 +290,7 @@ class Engine:
         }
         return self.store.prune_entries(self.retention_days, overrides, self.now())
 
-    def dispatch(self, alerts: List[Alert], mark: bool = True) -> None:
+    def dispatch(self, alerts: List[Alert], mark: bool = True) -> int:
         """Fan alerts out to the notifiers each source is routed to.
 
         A notifier is only called when at least one alert routes to it, and an
@@ -295,22 +298,65 @@ class Engine:
         notifier. This preserves the previous behaviour (a delivered alert is
         marked, a failed notifier is logged and skipped) while honouring the
         per-source ``notify_channels`` routing.
+
+        A source may set ``alert_cooldown_seconds`` to suppress notification
+        *only*: when a source alerted within the previous ``N`` seconds its new
+        alerts are kept in the store with ``notified = 0`` (so a later digest can
+        still pick them up) but are not fanned out now. The last dispatch time is
+        read from the source row so the cooldown survives a restart. Returns the
+        number of alerts suppressed by the cooldown so the caller can surface it
+        on :class:`ScanResult`.
         """
         if not alerts or not self.notifiers:
-            return
+            return 0
+        sources = {
+            source.id: source
+            for source in self.store.list_sources()
+            if source.id is not None
+        }
+        now = self.now()
+        allowed: Dict[int, bool] = {}
+        for alert in alerts:
+            source_id = alert.source_id
+            if source_id in allowed:
+                continue
+            source = sources.get(source_id)
+            cooldown = source.alert_cooldown_seconds if source is not None else None
+            if not cooldown or source is None or not source.last_alert_at:
+                allowed[source_id] = True
+                continue
+            try:
+                elapsed = (now - parse_iso8601(source.last_alert_at)).total_seconds()
+            except ValueError:
+                # An unparseable timestamp must not silence a source forever.
+                allowed[source_id] = True
+                continue
+            allowed[source_id] = elapsed >= cooldown
+        batch = [alert for alert in alerts if allowed.get(alert.source_id, True)]
+        suppressed = len(alerts) - len(batch)
+        if suppressed:
+            counts: Dict[int, int] = {}
+            for alert in alerts:
+                if not allowed.get(alert.source_id, True):
+                    counts[alert.source_id] = counts.get(alert.source_id, 0) + 1
+            self.store.record_suppressed_alerts(counts)
+        if not batch:
+            return suppressed
         names = self._source_names()
         channels = self._source_channels()
         webhook_urls = self._source_webhook_urls()
         delivered_ids = set()
         for notifier in self.notifiers:
-            batch = [
+            notifier_batch = [
                 alert
-                for alert in alerts
+                for alert in batch
                 if self._routes_to(channels.get(alert.source_id), notifier.name)
             ]
-            if not batch:
+            if not notifier_batch:
                 continue
-            for group, url in self._notifier_groups(notifier, batch, webhook_urls):
+            for group, url in self._notifier_groups(
+                notifier, notifier_batch, webhook_urls
+            ):
                 try:
                     if url is None:
                         notifier.send(group, names)
@@ -325,8 +371,14 @@ class Engine:
                 for alert in group:
                     if alert.id is not None:
                         delivered_ids.add(alert.id)
+        # Remember when each source last alerted so its cooldown window starts
+        # now, even across a process restart.
+        dispatched_at = now.isoformat(timespec="seconds")
+        for source_id in {alert.source_id for alert in batch}:
+            self.store.record_source_dispatch(source_id, dispatched_at)
         if mark and delivered_ids:
             self.store.mark_notified(sorted(delivered_ids))
+        return suppressed
 
     def flush_digest(self) -> Optional[Digest]:
         """Build and deliver a digest for the pending alerts, if any.

@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS sources (
     scan_jitter_seconds INTEGER,
     max_bytes INTEGER,
     retention_days INTEGER,
+    alert_cooldown_seconds INTEGER,
     headers TEXT,
     auth TEXT,
     extra_keywords TEXT NOT NULL DEFAULT '[]',
@@ -37,6 +38,8 @@ CREATE TABLE IF NOT EXISTS sources (
     failure_count INTEGER NOT NULL DEFAULT 0,
     breaker_until TEXT,
     truncated INTEGER NOT NULL DEFAULT 0,
+    last_alert_at TEXT,
+    alerts_suppressed INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 
@@ -177,6 +180,22 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE sources ADD COLUMN retention_days INTEGER"
             )
+        if "alert_cooldown_seconds" not in source_columns:
+            # Old rows keep ``NULL`` (read back as no cooldown, i.e. the default).
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN alert_cooldown_seconds INTEGER"
+            )
+        if "last_alert_at" not in source_columns:
+            # Old rows keep ``NULL`` so the first alert is never suppressed.
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN last_alert_at TEXT"
+            )
+        if "alerts_suppressed" not in source_columns:
+            # Old rows default to ``0`` suppressed alerts.
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN alerts_suppressed "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
 
         alert_columns = {
             row["name"]
@@ -210,10 +229,11 @@ class Store:
                    (name, url, kind, api_name, tracked_versions, enabled, selector,
                     min_severity, notify_channels, notify_webhook_url,
                     scan_interval_seconds, scan_jitter_seconds, max_bytes,
-                    retention_days, headers, auth,
+                    retention_days, alert_cooldown_seconds, headers, auth,
                     extra_keywords, suppress_keywords, failure_count,
-                    breaker_until, truncated, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    breaker_until, truncated, last_alert_at, alerts_suppressed,
+                    created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -229,6 +249,7 @@ class Store:
                     source.scan_jitter_seconds,
                     source.max_bytes,
                     source.retention_days,
+                    source.alert_cooldown_seconds,
                     json.dumps(source.headers or {}),
                     source.auth,
                     json.dumps(source.extra_keywords or []),
@@ -236,6 +257,8 @@ class Store:
                     source.failure_count,
                     source.breaker_until,
                     1 if source.truncated else 0,
+                    source.last_alert_at,
+                    source.alerts_suppressed,
                     _now(),
                 ),
             )
@@ -293,6 +316,37 @@ class Store:
             self._conn.execute(
                 "UPDATE sources SET truncated = ? WHERE id = ?",
                 (1 if truncated else 0, source_id),
+            )
+            self._conn.commit()
+
+    def record_source_dispatch(self, source_id: int, when: Optional[str]) -> None:
+        """Remember when an alert for ``source_id`` was last fanned out.
+
+        Persisting the timestamp (rather than only holding it in memory) lets the
+        per-source alert cooldown survive a restart: a source that just alerted
+        stays inside its window even if the process is recycled.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sources SET last_alert_at = ? WHERE id = ?",
+                (when, source_id),
+            )
+            self._conn.commit()
+
+    def record_suppressed_alerts(self, counts: dict) -> None:
+        """Increment each source's cumulative suppressed-alert counter.
+
+        ``counts`` maps a source id to the number of alerts the cooldown held
+        back in one dispatch. The counter is surfaced, aggregated, as
+        ``alerts_suppressed`` by :meth:`stats`.
+        """
+        if not counts:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE sources SET alerts_suppressed = alerts_suppressed + ? "
+                "WHERE id = ?",
+                [(count, source_id) for source_id, count in counts.items()],
             )
             self._conn.commit()
 
@@ -604,6 +658,9 @@ class Store:
             pending = self._conn.execute(
                 "SELECT COUNT(*) FROM alerts WHERE notified = 0 AND digest_id IS NULL"
             ).fetchone()[0]
+            suppressed = self._conn.execute(
+                "SELECT COALESCE(SUM(alerts_suppressed), 0) FROM sources"
+            ).fetchone()[0]
             last_run = self._conn.execute(
                 "SELECT * FROM check_runs ORDER BY id DESC LIMIT 1"
             ).fetchone()
@@ -618,6 +675,7 @@ class Store:
             "alerts_warning": warning,
             "digests": digests,
             "alerts_pending_digest": pending,
+            "alerts_suppressed": suppressed,
             "last_check": dict(last_run) if last_run else None,
         }
 
@@ -642,6 +700,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         scan_jitter_seconds=row["scan_jitter_seconds"],
         max_bytes=row["max_bytes"],
         retention_days=row["retention_days"],
+        alert_cooldown_seconds=row["alert_cooldown_seconds"],
         headers=json.loads(row["headers"] or "{}"),
         auth=row["auth"],
         extra_keywords=json.loads(row["extra_keywords"] or "[]"),
@@ -650,6 +709,8 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         failure_count=int(row["failure_count"] or 0),
         breaker_until=row["breaker_until"],
         truncated=bool(row["truncated"]),
+        last_alert_at=row["last_alert_at"],
+        alerts_suppressed=int(row["alerts_suppressed"] or 0),
     )
 
 
