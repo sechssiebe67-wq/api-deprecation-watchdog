@@ -14,7 +14,14 @@ from urllib.parse import parse_qs, urlparse
 from .config import Config
 from .dashboard import render_dashboard
 from .engine import Engine
-from .models import ALL_CHANNELS, NOTIFY_CHANNELS, SEVERITIES, SOURCE_KINDS, Source
+from .models import (
+    ALL_CHANNELS,
+    NOTIFY_CHANNELS,
+    SEVERITIES,
+    SOURCE_KINDS,
+    Source,
+    canonical_header_name,
+)
 from .store import Store
 
 log = logging.getLogger("apiwatch.app")
@@ -148,6 +155,31 @@ def validate_source_payload(
             raise ApiError(
                 400, "'scan_interval_seconds' must be a positive integer"
             )
+    headers = payload.get("headers")
+    if headers is None:
+        headers = {}
+    if not isinstance(headers, dict):
+        raise ApiError(400, "'headers' must be an object of string values")
+    normalized_headers = {}
+    for header_name, header_value in headers.items():
+        if not isinstance(header_name, str) or not header_name.strip():
+            raise ApiError(400, "'headers' names must be non-empty strings")
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in header_name):
+            raise ApiError(
+                400, "'headers' names must not contain control characters or newlines"
+            )
+        if not isinstance(header_value, str):
+            raise ApiError(400, "'headers' values must be strings")
+        if "\n" in header_value or "\r" in header_value:
+            raise ApiError(400, "'headers' values must not contain newlines")
+        normalized_headers[canonical_header_name(header_name)] = header_value
+    auth = payload.get("auth")
+    if auth is not None:
+        if not isinstance(auth, str) or auth.count(":") != 1:
+            raise ApiError(400, "'auth' must be a 'user:password' string")
+        user, password = auth.split(":", 1)
+        if not user or not password:
+            raise ApiError(400, "'auth' must have a non-empty user and password")
     return Source(
         name=name,
         url=url,
@@ -160,6 +192,8 @@ def validate_source_payload(
         notify_channels=normalized_channels,
         notify_webhook_url=notify_webhook_url,
         scan_interval_seconds=scan_interval,
+        headers=normalized_headers,
+        auth=auth,
     )
 
 

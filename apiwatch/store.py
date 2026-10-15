@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS sources (
     notify_channels TEXT NOT NULL DEFAULT '["all"]',
     notify_webhook_url TEXT,
     scan_interval_seconds INTEGER,
+    headers TEXT,
+    auth TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -123,6 +125,12 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE sources ADD COLUMN notify_webhook_url TEXT"
             )
+        if "headers" not in source_columns:
+            # Old rows keep ``NULL`` which is read back as ``{}``.
+            self._conn.execute("ALTER TABLE sources ADD COLUMN headers TEXT")
+        if "auth" not in source_columns:
+            # Old rows keep ``NULL`` which is read back as ``None``.
+            self._conn.execute("ALTER TABLE sources ADD COLUMN auth TEXT")
 
         alert_columns = {
             row["name"]
@@ -155,8 +163,8 @@ class Store:
                 """INSERT INTO sources
                    (name, url, kind, api_name, tracked_versions, enabled, selector,
                     min_severity, notify_channels, notify_webhook_url,
-                    scan_interval_seconds, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    scan_interval_seconds, headers, auth, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -169,6 +177,8 @@ class Store:
                     json.dumps(source.notify_channels),
                     source.notify_webhook_url,
                     source.scan_interval_seconds,
+                    json.dumps(source.headers or {}),
+                    source.auth,
                     _now(),
                 ),
             )
@@ -468,6 +478,8 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         notify_channels=json.loads(row["notify_channels"] or '["all"]'),
         notify_webhook_url=row["notify_webhook_url"],
         scan_interval_seconds=row["scan_interval_seconds"],
+        headers=json.loads(row["headers"] or "{}"),
+        auth=row["auth"],
         created_at=row["created_at"],
     )
 

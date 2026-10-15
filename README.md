@@ -46,6 +46,13 @@ actually use.
   cadence, so a volatile dependency can be polled every 15 minutes while a
   stable SDK is checked once a day. Omitting it keeps the global cadence; a
   manual `POST /api/check` always scans every enabled source.
+- **Per-source request headers & basic auth**: each source can send custom HTTP
+  `headers` (for example `{"X-Api-Key": "secret"}`) and an `auth`
+  (`"user:password"`) convenience field that adds
+  `Authorization: Basic <base64>`. This unlocks private GitHub Enterprise or
+  GitLab instances, token-gated statuspages and internal changelogs. Header
+  names are normalized case-insensitively (`user-agent` == `User-Agent`); the
+  dashboard shows only a lock/header-count indicator, never the secret values.
 - **SQLite history** with content-hash de-duplication (no repeated alerts).
 - **Notifications** via Slack webhook, SMTP e-mail, a generic JSON webhook and
   console.
@@ -60,7 +67,8 @@ actually use.
 - **Digest notifications** that batch alerts into a single grouped, severity-
   ordered summary on a configurable cadence (`off`, `digest` or `both`).
 - **Web dashboard** with an `Interval` column showing each source's cadence (or
-  the global default) and a JSON API.
+  the global default), an `Auth` column showing a lock/header-count indicator
+  (never the secret values) and a JSON API.
 - **Operations-ready**: `GET /healthz`, background poller, non-root container,
   Helm chart, `linux/amd64` + `linux/arm64` image.
 
@@ -142,6 +150,8 @@ Register a source. The `POST /api/sources` payload accepts:
 | `notify_channels`  | no       | Channels that receive this source's alerts: a list of `console`, `slack`, `email`, `webhook` or `all` (default `all`) |
 | `notify_webhook_url` | no     | `http(s)` URL that overrides `WEBHOOK_URL` for this source's alerts and digests |
 | `scan_interval_seconds` | no  | Positive integer override for this source's polling cadence; omitted keeps the global `POLL_INTERVAL_SECONDS` |
+| `headers`          | no       | JSON object of header name to string value sent on every fetch (merged over the defaults; names normalized case-insensitively) |
+| `auth`             | no       | `"user:password"` HTTP Basic credentials; adds `Authorization: Basic <base64>` |
 
 For `html`, `selector` is a CSS-like simple selector (optional tag, `#id`,
 `.class`, or a combination). It matches a block when the block or an ancestor
@@ -257,6 +267,27 @@ timer. Both the per-source value and the global default are floored at 30
 seconds. A manual `POST /api/check` ignores the intervals and scans every
 enabled source in one run.
 
+`headers` sends extra HTTP headers on every fetch of that source. It is a JSON
+object of string-to-string entries, merged over the default `User-Agent` and
+`Accept` headers, so a token-gated or custom-`Accept` feed can be monitored
+without forking. Header names are normalized case-insensitively to a canonical
+`Title-Case` form, so `user-agent` and `User-Agent` collapse to the same key and
+the last write wins. A non-object `headers`, a header name that is empty or
+contains control characters/newlines, or a non-string/newline-containing value
+is rejected with a `400` naming `headers`.
+
+`auth` is a convenience for HTTP Basic auth. It must be a `"user:password"`
+string with exactly one `:` and non-empty parts; the fetcher then sends
+`Authorization: Basic <base64(user:password)>` on every fetch. A value without a
+colon, or with an empty user or password, is rejected with a `400` naming
+`auth`. Neither the header values nor the credentials are ever logged or
+rendered in the dashboard (which shows only a lock/header-count indicator).
+
+> **Warning:** `headers` and `auth` are stored in the SQLite database in plain
+> text and are returned by the API. Protect the data volume, set `API_TOKEN`
+> and restrict network access to the service just as you would for any other
+> secret.
+
 `GET /api/sources/:id/entries` returns the entries recorded for one source,
 newest first (ordered by `created_at` then `id`, both descending) and capped by
 the optional `?limit=` query parameter (default `100`). An unknown `:id` returns
@@ -341,6 +372,19 @@ curl -X POST http://localhost:8080/api/sources \
        "kind":"statuspage","api_name":"Payments","tracked_versions":["v1"],
        "min_severity":"warning","notify_channels":["webhook"],
        "notify_webhook_url":"https://incidents.example/hooks/watchdog-critical"}'
+
+# Token-gated feed: send a custom header on every fetch of this source.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Private status","url":"https://status.corp.example/api/v2/incidents.json",
+       "kind":"statuspage","api_name":"Internal",
+       "headers":{"X-Api-Key":"secret-token","Accept":"application/json"}}'
+
+# HTTP Basic auth: fetches send Authorization: Basic <base64(user:pass)>.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Self-managed GitLab","url":"https://gitlab.corp.example/group/project",
+       "kind":"gitlab","api_name":"Widget","auth":"bot:glpat-secret"}'
 ```
 
 ## Digest notifications

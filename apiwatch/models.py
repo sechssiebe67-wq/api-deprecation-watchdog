@@ -3,12 +3,21 @@
 Plain dataclasses so the core logic stays dependency-free and easy to test.
 """
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 SOURCE_KINDS = ("rss", "html", "json", "statuspage", "github", "gitlab", "openapi")
 SEVERITIES = ("critical", "warning", "info")
 NOTIFY_CHANNELS = ("console", "slack", "email", "webhook")
 ALL_CHANNELS = "all"
+
+
+def canonical_header_name(name: str) -> str:
+    """Return the canonical ``Title-Case`` form of an HTTP header name.
+
+    ``user-agent`` and ``User-Agent`` both map to ``User-Agent`` so the two
+    spellings cannot be stored as separate keys.
+    """
+    return "-".join(part.capitalize() for part in name.strip().split("-"))
 
 
 @dataclass
@@ -24,6 +33,8 @@ class Source:
     notify_channels: List[str] = field(default_factory=lambda: [ALL_CHANNELS])
     notify_webhook_url: Optional[str] = None
     scan_interval_seconds: Optional[int] = None
+    headers: Dict[str, str] = field(default_factory=dict)
+    auth: Optional[str] = None
     id: Optional[int] = None
     created_at: Optional[str] = None
 
@@ -62,6 +73,34 @@ class Source:
         # An empty list means "all channels"; normalising it keeps the stored
         # value and the dashboard unambiguous.
         self.notify_channels = normalized or [ALL_CHANNELS]
+        self.headers = self._validate_headers(self.headers)
+        if self.auth is not None:
+            if not isinstance(self.auth, str) or self.auth.count(":") != 1:
+                raise ValueError("auth must be a 'user:password' string")
+            user, password = self.auth.split(":", 1)
+            if not user or not password:
+                raise ValueError("auth must have a non-empty user and password")
+
+    @staticmethod
+    def _validate_headers(headers) -> Dict[str, str]:
+        if headers is None:
+            return {}
+        if not isinstance(headers, dict):
+            raise ValueError("headers must be an object of string values")
+        normalized: Dict[str, str] = {}
+        for name, value in headers.items():
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("headers names must be non-empty strings")
+            if any(ord(ch) < 32 or ord(ch) == 127 for ch in name):
+                raise ValueError(
+                    "headers names must not contain control characters or newlines"
+                )
+            if not isinstance(value, str):
+                raise ValueError("headers values must be strings")
+            if "\n" in value or "\r" in value:
+                raise ValueError("headers values must not contain newlines")
+            normalized[canonical_header_name(name)] = value
+        return normalized
 
     def to_dict(self) -> dict:
         return {
@@ -77,6 +116,8 @@ class Source:
             "notify_channels": list(self.notify_channels),
             "notify_webhook_url": self.notify_webhook_url,
             "scan_interval_seconds": self.scan_interval_seconds,
+            "headers": dict(self.headers),
+            "auth": self.auth,
             "created_at": self.created_at,
         }
 

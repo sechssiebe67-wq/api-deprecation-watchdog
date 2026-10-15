@@ -62,7 +62,9 @@ class Engine:
             result.errors.append("source has no id")
             return result
         try:
-            body = self.fetcher.fetch(source.url)
+            body = self.fetcher.fetch(
+                source.url, headers=source.headers, auth=source.auth
+            )
         except FetchError as exc:
             result.sources_failed += 1
             result.errors.append("%s: %s" % (source.name, exc))
