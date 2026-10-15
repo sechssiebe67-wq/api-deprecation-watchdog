@@ -27,6 +27,12 @@ _GITHUB_HTML_RE = re.compile(
 _GITHUB_API_RE = re.compile(
     r"^https?://api\.github\.com/repos/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:/releases)?/?$"
 )
+_GITLAB_API_RE = re.compile(
+    r"^https?://(?:www\.)?gitlab\.com/api/v4/projects/[^/?#]+(?:%2F[^/?#]+)*/releases/?$"
+)
+_GITLAB_HTML_RE = re.compile(
+    r"^https?://(?:www\.)?gitlab\.com/(?P<path>(?!api/)[^?#]+?)(?:\.git)?/?$"
+)
 
 
 class ApiError(Exception):
@@ -54,6 +60,29 @@ def normalize_github_url(url: str) -> str:
     return url
 
 
+def normalize_gitlab_url(url: str) -> str:
+    """Normalize a GitLab project URL to its releases REST API URL.
+
+    Accepts ``https://gitlab.com/<group>/<project>`` (with an optional trailing
+    ``.git`` or ``/``; nested subgroups are allowed) and returns
+    ``https://gitlab.com/api/v4/projects/<group>%2F<project>/releases``. An
+    existing ``https://gitlab.com/api/v4/projects/<id-or-path>/releases`` URL is
+    returned unchanged, and anything that does not look like a GitLab project
+    URL is returned unchanged too.
+    """
+    stripped = url.strip()
+    if _GITLAB_API_RE.match(stripped):
+        return url
+    match = _GITLAB_HTML_RE.match(stripped)
+    if match:
+        path = match.group("path").strip("/")
+        if "/" in path:
+            return "https://gitlab.com/api/v4/projects/%s/releases" % path.replace(
+                "/", "%2F"
+            )
+    return url
+
+
 def validate_source_payload(
     payload: dict, default_channels: Optional[List[str]] = None
 ) -> Source:
@@ -70,6 +99,8 @@ def validate_source_payload(
         raise ApiError(400, "'kind' must be one of %s" % ", ".join(SOURCE_KINDS))
     if kind == "github":
         url = normalize_github_url(url)
+    elif kind == "gitlab":
+        url = normalize_gitlab_url(url)
     versions = payload.get("tracked_versions") or []
     if not isinstance(versions, list) or not all(isinstance(v, str) for v in versions):
         raise ApiError(400, "'tracked_versions' must be a list of strings")

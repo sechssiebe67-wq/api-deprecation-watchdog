@@ -28,8 +28,8 @@ heterogeneous noise into a single prioritized alert stream.
 
 - Deprecation-focused detection instead of generic uptime/API monitoring.
 - Rule-based extraction from heterogeneous sources (RSS, HTML, JSON,
-  statuspage.io, GitHub releases and OpenAPI/Swagger specs), with per-source
-  selectors for precision, plus true schema diffing for OpenAPI.
+  statuspage.io, GitHub and GitLab releases and OpenAPI/Swagger specs), with
+  per-source selectors for precision, plus true schema diffing for OpenAPI.
 - Relevance filtering against the API versions a team actually uses, so the
   signal stays small.
 - Delivery into existing developer workflows; no agent installation required.
@@ -37,19 +37,29 @@ heterogeneous noise into a single prioritized alert stream.
 ## Current capabilities (MVP increment)
 
 - **Source registry:** add, list and remove monitored sources with a kind
-  (`rss`, `html`, `json`, `statuspage`, `github`, `openapi`), an API name, the
-  tracked versions and an optional per-source selector.
+  (`rss`, `html`, `json`, `statuspage`, `github`, `gitlab`, `openapi`), an API
+  name, the tracked versions and an optional per-source selector.
 - **Parsers:** built-in parsers for RSS/Atom XML, JSON changelogs (several
   common shapes), HTML changelogs (headings + following content),
   statuspage.io JSON (`incidents` + `scheduled_maintenances`), GitHub
-  releases (`releases` + pre-releases via the REST API) and OpenAPI/Swagger
-  specs (structural diffing), all dependency-free.
+  releases (`releases` + pre-releases via the REST API), GitLab releases
+  (`releases` via the REST API) and OpenAPI/Swagger specs (structural
+  diffing), all dependency-free.
   A `github` registration accepts either the API URL
   (`https://api.github.com/repos/owner/repo/releases`) or the repository HTML
   URL (`https://github.com/owner/repo`), which is normalized to the API URL;
   release `name`/`tag_name` becomes the title, `body` the body, `html_url` the
   link, `published_at` the date and `tag_name`/`prerelease` the categories,
   while drafts are skipped.
+  A `gitlab` registration mirrors that contract: it accepts either the project
+  HTML URL (`https://gitlab.com/group/project`, with an optional trailing
+  `.git` or `/`, nested subgroups allowed) or the releases API URL
+  (`https://gitlab.com/api/v4/projects/<id-or-path>/releases`), normalizing
+  the HTML form to
+  `https://gitlab.com/api/v4/projects/<group>%2F<project>/releases`; release
+  `name`/`tag_name` becomes the title, `description` the body, `_links.self`
+  the link, `released_at` the date and `tag_name`/`upcoming_release` the
+  categories (GitLab has no drafts, so nothing is skipped).
 - **OpenAPI diff detection:** an `openapi` source fetches a spec URL, walks an
   optional dotted `selector` to a list of spec versions (or treats the document
   itself as a single spec), diffs each consecutive pair and emits one entry per
@@ -72,8 +82,9 @@ heterogeneous noise into a single prioritized alert stream.
   categories include the change kind and the affected path.
 - **Per-source selectors:** `html` sources accept a CSS-like simple selector
   (tag, `#id`, `.class`, e.g. `h2.deprecation` or `#changelog`) and `json` /
-  `github` / `openapi` sources accept a dotted path (e.g. `data.releases` or
-  `versions`), so noisy pages yield the right blocks without code changes.
+  `github` / `gitlab` / `openapi` sources accept a dotted path (e.g.
+  `data.releases` or `versions`), so noisy pages yield the right blocks without
+  code changes.
 - **Relevance engine:** detects deprecation / breaking-change language
   (`deprecated`, `sunset`, `end of life`, `removed`, `breaking`, …) and boosts
   entries that mention a tracked version. Classifies each hit as
@@ -158,6 +169,8 @@ change. It means different things per kind:
   - `data.releases` → walk `data` then `releases` before collecting entries.
 - **`github`** – the same dotted path syntax, useful for wrapped API payloads.
   - `data.releases` → walk `data` then `releases` before collecting entries.
+- **`gitlab`** – the same dotted path syntax, useful for wrapped API payloads.
+  - `data.releases` → walk `data` then `releases` before collecting entries.
 - **`openapi`** – the same dotted path syntax, pointing at the list of spec
   versions in the fetched document. Each consecutive pair is diffed oldest
   first. When the selector is omitted (or resolves to a single spec) the
@@ -212,6 +225,13 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Widget SDK","url":"https://github.com/acme/widget","kind":"github",
        "api_name":"Widget","tracked_versions":["v2"],"min_severity":"warning"}'
 
+# GitLab releases: paste the project URL, it is normalized to the releases API.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Widget SDK (GitLab)","url":"https://gitlab.com/acme/widget",
+       "kind":"gitlab","api_name":"Widget","tracked_versions":["v2"],
+       "min_severity":"warning"}'
+
 # OpenAPI spec: diff the versions array and only alert on warning or critical
 # structural changes (removed paths, narrowed enums, added required params, ...).
 curl -X POST http://localhost:8080/api/sources \
@@ -243,6 +263,11 @@ while still recording the underlying entries.
 through the GitHub REST API and normalizes the repository HTML URL to the API
 URL, so breaking-change notes in release bodies are parsed and classified.
 
+*Shipped:* **GitLab releases adapter** (see *Current capabilities*) — a
+`gitlab` source kind that mirrors the GitHub adapter against the public GitLab
+REST API, normalizing the project HTML URL to the releases API URL, so teams
+whose dependencies are hosted on GitLab get the same release-body signal.
+
 *Shipped:* **OpenAPI diff detection** (see *Current capabilities*) — an
 `openapi` source kind that diffs two spec versions (or one spec against the
 empty spec) and emits one entry per structural change, with the severity
@@ -255,7 +280,9 @@ relevance* items below are now partially shipped: the existing channels are
 usable per dependency without adding a new external integration.
 
 1. **More source adapters:** additional structured feeds beyond the shipped
-   GitHub releases and OpenAPI adapters.
+   GitHub and GitLab releases and OpenAPI adapters. *Partially shipped:*
+   the `gitlab` adapter now covers GitLab-hosted releases; further forges and
+   trackers remain.
 2. **Smarter relevance:** semantic matching of version ranges (semver / date
    versions), per-team severity rules and richer keyword tuning. *Partially
    shipped:* per-source `min_severity` and `notify_channels` already let a team
@@ -274,7 +301,7 @@ usable per dependency without adding a new external integration.
 ```
 sources ──▶ fetcher ──▶ parsers ──▶ relevance ──▶ store (SQLite)
                           │                     └─▶ notifiers (Slack / e-mail / console)
-                          └─ adapters: rss · html · json · statuspage · github · openapi
+                          └─ adapters: rss · html · json · statuspage · github · gitlab · openapi
                                                         ▲
 HTTP API + dashboard ──▶ engine (scan) ──▶ scheduler (background poll)
 ```
