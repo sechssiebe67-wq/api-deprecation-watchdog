@@ -43,6 +43,49 @@ class RelevanceTests(unittest.TestCase):
         self.assertEqual(max_severity(["info", "critical", "warning"]), "critical")
         self.assertEqual(max_severity([]), "info")
 
+    def test_extra_keyword_promotes_and_matches_case_insensitively(self):
+        entry = ParsedEntry(
+            title="Acme will wind v1 down",
+            body="This is the end of support for the old interface.",
+        )
+        base = analyze(entry, versions=["v1"])
+        self.assertEqual(base.severity, "info")
+
+        verdict = analyze(
+            entry, versions=["v1"], extra_keywords=["  END OF SUPPORT  "]
+        )
+        self.assertTrue(verdict.relevant)
+        self.assertEqual(verdict.severity, "critical")
+        self.assertIn("end of support", verdict.matched_terms)
+
+    def test_suppress_keyword_removes_builtin_match(self):
+        entry = ParsedEntry(title="Sunset planned", body="Please prepare.")
+        self.assertTrue(analyze(entry, versions=[]).relevant)
+
+        verdict = analyze(entry, versions=[], suppress_keywords=["SUNSET"])
+        self.assertFalse(verdict.relevant)
+        self.assertEqual(verdict.matched_terms, [])
+
+    def test_empty_overrides_match_legacy_behaviour(self):
+        entry = ParsedEntry(title="v1 deprecated", body="Please migrate.")
+        legacy = analyze(entry, versions=["v1"])
+        with_empty = analyze(
+            entry, versions=["v1"], extra_keywords=[], suppress_keywords=[]
+        )
+        self.assertEqual(legacy.severity, with_empty.severity)
+        self.assertEqual(legacy.relevant, with_empty.relevant)
+        self.assertEqual(legacy.matched_terms, with_empty.matched_terms)
+
+    def test_suppress_beats_extra_for_same_term(self):
+        entry = ParsedEntry(title="Widget is winding down", body="Nothing else.")
+        verdict = analyze(
+            entry,
+            versions=[],
+            extra_keywords=["winding down"],
+            suppress_keywords=["winding down"],
+        )
+        self.assertFalse(verdict.relevant)
+
 
 if __name__ == "__main__":
     unittest.main()

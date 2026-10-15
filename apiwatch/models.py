@@ -57,6 +57,8 @@ class Source:
     scan_interval_seconds: Optional[int] = None
     headers: Dict[str, str] = field(default_factory=dict)
     auth: Optional[str] = None
+    extra_keywords: List[str] = field(default_factory=list)
+    suppress_keywords: List[str] = field(default_factory=list)
     id: Optional[int] = None
     created_at: Optional[str] = None
     failure_count: int = 0
@@ -98,6 +100,12 @@ class Source:
         # value and the dashboard unambiguous.
         self.notify_channels = normalized or [ALL_CHANNELS]
         self.headers = self._validate_headers(self.headers)
+        self.extra_keywords = self._normalize_keywords(
+            self.extra_keywords, "extra_keywords"
+        )
+        self.suppress_keywords = self._normalize_keywords(
+            self.suppress_keywords, "suppress_keywords"
+        )
         if self.auth is not None:
             if not isinstance(self.auth, str) or self.auth.count(":") != 1:
                 raise ValueError("auth must be a 'user:password' string")
@@ -142,6 +150,27 @@ class Source:
             normalized[canonical_header_name(name)] = value
         return normalized
 
+    @staticmethod
+    def _normalize_keywords(terms, field_name: str) -> List[str]:
+        """Normalize an override keyword list to trimmed lowercase terms.
+
+        ``None`` is treated as an empty list. Non-list values and non-string
+        (or blank) entries raise ``ValueError`` so callers cannot poison the
+        relevance engine with malformed overrides.
+        """
+        if terms is None:
+            return []
+        if not isinstance(terms, (list, tuple)):
+            raise ValueError("%s must be a list of strings" % field_name)
+        normalized: List[str] = []
+        for term in terms:
+            if not isinstance(term, str) or not term.strip():
+                raise ValueError("%s must be a list of strings" % field_name)
+            term = term.strip().lower()
+            if term not in normalized:
+                normalized.append(term)
+        return normalized
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -158,6 +187,8 @@ class Source:
             "scan_interval_seconds": self.scan_interval_seconds,
             "headers": dict(self.headers),
             "auth": self.auth,
+            "extra_keywords": list(self.extra_keywords),
+            "suppress_keywords": list(self.suppress_keywords),
             "failure_count": self.failure_count,
             "breaker_until": self.breaker_until,
             "created_at": self.created_at,

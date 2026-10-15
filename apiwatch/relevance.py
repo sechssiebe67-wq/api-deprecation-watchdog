@@ -72,6 +72,18 @@ def _search_terms(text: str, terms) -> List[str]:
     return hits
 
 
+def _normalize_terms(terms) -> List[str]:
+    """Return trimmed lowercase terms, dropping blanks and duplicates."""
+    normalized: List[str] = []
+    for term in terms or []:
+        if not isinstance(term, str):
+            continue
+        term = term.strip().lower()
+        if term and term not in normalized:
+            normalized.append(term)
+    return normalized
+
+
 def _version_hits(text: str, versions: List[str]) -> List[str]:
     lowered = text.lower()
     hits: List[str] = []
@@ -87,20 +99,43 @@ def _version_hits(text: str, versions: List[str]) -> List[str]:
     return hits
 
 
-def analyze(entry: ParsedEntry, versions: List[str] = None, require_version: bool = False) -> Relevance:
+def analyze(
+    entry: ParsedEntry,
+    versions: List[str] = None,
+    require_version: bool = False,
+    extra_keywords: List[str] = None,
+    suppress_keywords: List[str] = None,
+) -> Relevance:
     """Classify an entry.
 
     ``require_version`` drops entries that do not mention any tracked version,
     which keeps the alert stream focused for teams with version-pinned usage.
+
+    ``extra_keywords`` extends the built-in vocabulary per source: each term is
+    matched case-insensitively on the same word boundaries as the built-in
+    terms and raises an otherwise low-signal entry to ``critical``. A term in
+    ``suppress_keywords`` is removed from the matched set before classification,
+    so a source can mute a noisy phrase without losing the rest of the
+    vocabulary. With both lists empty the result is identical to the legacy
+    behaviour.
     """
     versions = versions or []
+    extras = _normalize_terms(extra_keywords)
+    suppressed = set(_normalize_terms(suppress_keywords))
     text = " ".join(
         [entry.title, entry.body] + list(entry.categories)
     )
-    critical = _search_terms(text, CRITICAL_TERMS)
+    critical = _search_terms(
+        text, tuple(dict.fromkeys(tuple(CRITICAL_TERMS) + tuple(extras)))
+    )
     warning = _search_terms(text, WARNING_TERMS)
     info = _search_terms(text, INFO_TERMS)
     version_hits = _version_hits(text, versions)
+
+    if suppressed:
+        critical = [term for term in critical if term not in suppressed]
+        warning = [term for term in warning if term not in suppressed]
+        info = [term for term in info if term not in suppressed]
 
     matched = critical + warning + info
 

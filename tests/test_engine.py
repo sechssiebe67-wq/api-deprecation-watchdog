@@ -86,6 +86,59 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result.alerts_created, 1)
         self.assertEqual(result.alerts[0].title, "v1 deprecated")
 
+    def test_scan_source_honours_extra_keywords(self):
+        url = "https://example.com/extra"
+        feed = """<?xml version="1.0"?>
+<rss version="2.0"><channel>
+  <item><title>Acme announces end of support</title>
+    <description>The old console goes away.</description>
+    <link>https://example.com/extra</link></item>
+</channel></rss>
+"""
+        baseline = self.store.add_source(
+            Source(name="Baseline", url=url, kind="rss", tracked_versions=["v1"])
+        )
+        tuned = self.store.add_source(
+            Source(
+                name="Tuned",
+                url=url,
+                kind="rss",
+                tracked_versions=["v1"],
+                extra_keywords=["end of support"],
+            )
+        )
+        engine = Engine(self.store, FakeFetcher({url: feed}))
+
+        baseline_result = engine.scan_source(baseline)
+        self.assertEqual(baseline_result.alerts_created, 0)
+
+        tuned_result = engine.scan_source(tuned)
+        self.assertEqual(tuned_result.alerts_created, 1)
+        self.assertEqual(tuned_result.alerts[0].severity, "critical")
+
+    def test_scan_source_honours_suppress_keywords(self):
+        url = "https://example.com/suppress"
+        feed = """<?xml version="1.0"?>
+<rss version="2.0"><channel>
+  <item><title>Maintenance notice</title>
+    <description>Planned work this weekend.</description>
+    <link>https://example.com/suppress</link></item>
+</channel></rss>
+"""
+        source = self.store.add_source(
+            Source(
+                name="Muted",
+                url=url,
+                kind="rss",
+                tracked_versions=["v1"],
+                suppress_keywords=["notice"],
+            )
+        )
+        engine = Engine(self.store, FakeFetcher({url: feed}))
+        result = engine.scan_source(source)
+        self.assertEqual(result.alerts_created, 0)
+        self.assertEqual(self.store.list_alerts(), [])
+
     def test_rescan_is_idempotent(self):
         fetcher = FakeFetcher({self.url: RSS})
         engine = Engine(self.store, fetcher)

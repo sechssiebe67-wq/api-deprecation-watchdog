@@ -170,7 +170,13 @@ class Engine:
             if stored is None:
                 continue  # already known
             result.entries_new += 1
-            verdict = analyze(item, versions, require_version=self.require_version)
+            verdict = analyze(
+                item,
+                versions,
+                require_version=self.require_version,
+                extra_keywords=source.extra_keywords,
+                suppress_keywords=source.suppress_keywords,
+            )
             if not verdict.relevant:
                 continue
             if not meets_floor(verdict.severity, source.min_severity):

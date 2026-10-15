@@ -130,6 +130,92 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(self.store.get_source(created.id).notify_webhook_url)
         self.assertIsNone(created.to_dict()["notify_webhook_url"])
 
+    def test_source_keywords_default_to_empty(self):
+        created = self.store.add_source(self._source())
+        self.assertEqual(created.extra_keywords, [])
+        self.assertEqual(created.suppress_keywords, [])
+        self.assertEqual(created.to_dict()["extra_keywords"], [])
+        fetched = self.store.get_source(created.id)
+        self.assertEqual(fetched.extra_keywords, [])
+        self.assertEqual(fetched.suppress_keywords, [])
+
+    def test_source_keywords_round_trip(self):
+        created = self.store.add_source(
+            self._source(
+                extra_keywords=["retired", "eol"],
+                suppress_keywords=["notice"],
+            )
+        )
+        self.assertEqual(created.extra_keywords, ["retired", "eol"])
+        self.assertEqual(created.suppress_keywords, ["notice"])
+        self.assertEqual(created.to_dict()["extra_keywords"], ["retired", "eol"])
+        fetched = self.store.get_source(created.id)
+        self.assertEqual(fetched.extra_keywords, ["retired", "eol"])
+        self.assertEqual(fetched.suppress_keywords, ["notice"])
+        listed = self.store.list_sources()[0]
+        self.assertEqual(listed.extra_keywords, ["retired", "eol"])
+        self.assertEqual(listed.suppress_keywords, ["notice"])
+
+    def test_migrates_sources_table_without_keyword_columns(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = sqlite3.connect(path)
+            conn.executescript(
+                """
+                CREATE TABLE sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    api_name TEXT NOT NULL DEFAULT '',
+                    tracked_versions TEXT NOT NULL DEFAULT '[]',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    selector TEXT,
+                    min_severity TEXT NOT NULL DEFAULT 'info',
+                    notify_channels TEXT NOT NULL DEFAULT '["all"]',
+                    notify_webhook_url TEXT,
+                    scan_interval_seconds INTEGER,
+                    headers TEXT,
+                    auth TEXT,
+                    failure_count INTEGER NOT NULL DEFAULT 0,
+                    breaker_until TEXT,
+                    created_at TEXT NOT NULL
+                );
+                INSERT INTO sources
+                    (name, url, kind, api_name, tracked_versions, enabled, selector,
+                     min_severity, notify_channels, failure_count, created_at)
+                VALUES ('Legacy', 'https://legacy.example/feed', 'rss', '', '[]', 1, NULL,
+                        'info', '["all"]', 0, '2024-01-01');
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            store = Store(path)
+            columns = {
+                row["name"]
+                for row in store._conn.execute("PRAGMA table_info(sources)").fetchall()
+            }
+            self.assertIn("extra_keywords", columns)
+            self.assertIn("suppress_keywords", columns)
+            legacy = store.list_sources()[0]
+            self.assertEqual(legacy.name, "Legacy")
+            self.assertEqual(legacy.extra_keywords, [])
+            self.assertEqual(legacy.suppress_keywords, [])
+            fresh = store.add_source(
+                self._source(
+                    name="New",
+                    extra_keywords=["retired"],
+                    suppress_keywords=["notice"],
+                )
+            )
+            self.assertEqual(fresh.extra_keywords, ["retired"])
+            self.assertEqual(fresh.suppress_keywords, ["notice"])
+            store.close()
+        finally:
+            os.remove(path)
+
     def test_migrates_sources_table_without_notify_webhook_url(self):
         fd, path = tempfile.mkstemp(suffix=".db")
         os.close(fd)

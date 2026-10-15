@@ -183,6 +183,8 @@ def validate_source_payload(
         user, password = auth.split(":", 1)
         if not user or not password:
             raise ApiError(400, "'auth' must have a non-empty user and password")
+    extra_keywords = _validate_keyword_list(payload, "extra_keywords")
+    suppress_keywords = _validate_keyword_list(payload, "suppress_keywords")
     return Source(
         name=name,
         url=url,
@@ -197,7 +199,32 @@ def validate_source_payload(
         scan_interval_seconds=scan_interval,
         headers=normalized_headers,
         auth=auth,
+        extra_keywords=extra_keywords,
+        suppress_keywords=suppress_keywords,
     )
+
+
+def _validate_keyword_list(payload: dict, field: str) -> List[str]:
+    """Validate and normalize an optional override keyword list.
+
+    Missing values (or ``null``) become an empty list. A non-list value or a
+    non-string / blank entry is rejected with a ``400`` naming the field. Valid
+    terms are trimmed, lower-cased and de-duplicated so the stored vocabulary is
+    canonical.
+    """
+    value = payload.get(field)
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(term, str) for term in value):
+        raise ApiError(400, "'%s' must be a list of strings" % field)
+    normalized: List[str] = []
+    for term in value:
+        term = term.strip().lower()
+        if not term:
+            raise ApiError(400, "'%s' must be a list of strings" % field)
+        if term not in normalized:
+            normalized.append(term)
+    return normalized
 
 
 class WatchdogHandler(BaseHTTPRequestHandler):
