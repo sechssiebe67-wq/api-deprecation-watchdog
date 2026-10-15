@@ -52,6 +52,12 @@ spec:
               value: {{ .Values.config.seedSources | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.config.logLevel | quote }}
+            - name: DIGEST_MODE
+              value: {{ .Values.config.digestMode | quote }}
+            - name: DIGEST_INTERVAL_SECONDS
+              value: {{ .Values.config.digestIntervalSeconds | quote }}
+            - name: DIGEST_MAX_ALERTS
+              value: {{ .Values.config.digestMaxAlerts | quote }}
             {{- if .Values.existingSecret }}
             - name: API_TOKEN
               valueFrom:

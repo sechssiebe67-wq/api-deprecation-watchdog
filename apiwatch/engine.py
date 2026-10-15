@@ -7,9 +7,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
+from . import digest as digest_builder
 from . import parsers
 from .fetcher import FetchError, Fetcher
-from .models import Alert, Entry, Source
+from .models import Alert, Digest, Entry, Source
 from .notify import NotificationError, Notifier, format_alert
 from .relevance import analyze
 from .store import Store
@@ -45,11 +46,15 @@ class Engine:
         fetcher: Fetcher,
         notifiers: Optional[Sequence[Notifier]] = None,
         require_version: bool = False,
+        digest_mode: str = "off",
+        digest_max_alerts: int = 50,
     ) -> None:
         self.store = store
         self.fetcher = fetcher
         self.notifiers = list(notifiers or [])
         self.require_version = require_version
+        self.digest_mode = digest_mode if digest_mode in ("off", "digest", "both") else "off"
+        self.digest_max_alerts = max(1, int(digest_max_alerts))
 
     def scan_source(self, source: Source, notify: bool = True) -> ScanResult:
         result = ScanResult()
@@ -104,7 +109,11 @@ class Engine:
         result.alerts_created = len(new_alerts)
         result.alerts = new_alerts
         if notify and new_alerts:
-            self.dispatch(new_alerts)
+            if self.digest_mode == "off":
+                self.dispatch(new_alerts)
+            elif self.digest_mode == "both":
+                self.dispatch(new_alerts, mark=False)
+            # "digest": hold the alerts back for the next digest flush.
         return result
 
     def scan_all(self, notify: bool = True) -> ScanResult:
@@ -123,12 +132,10 @@ class Engine:
                 log.warning("scan errors for %s: %s", source.name, sub.errors)
         return result
 
-    def dispatch(self, alerts: List[Alert]) -> None:
+    def dispatch(self, alerts: List[Alert], mark: bool = True) -> None:
         if not alerts or not self.notifiers:
             return
-        names: Dict[int, str] = {
-            source.id: source.name for source in self.store.list_sources() if source.id is not None
-        }
+        names = self._source_names()
         delivered = False
         for notifier in self.notifiers:
             try:
@@ -138,8 +145,52 @@ class Engine:
                 log.warning("notifier %s failed: %s", notifier.name, exc)
             except Exception as exc:  # pragma: no cover - defensive
                 log.warning("notifier %s crashed: %s", notifier.name, exc)
-        if delivered:
+        if delivered and mark:
             self.store.mark_notified([alert.id for alert in alerts if alert.id is not None])
+
+    def flush_digest(self) -> Optional[Digest]:
+        """Build and deliver a digest for the pending alerts, if any.
+
+        Never raises on notifier failure: the digest is logged and left
+        undelivered so the failure can be observed without aborting the caller.
+        """
+        alerts = self.store.list_undigested_alerts()
+        if not alerts:
+            return None
+        names = self._source_names()
+        digest = digest_builder.build_digest(
+            alerts, names, max_alerts=self.digest_max_alerts
+        )
+        stored = self.store.create_digest(digest)
+        alert_ids = [alert.id for alert in alerts if alert.id is not None]
+        if self._deliver_digest(stored, names):
+            self.store.attach_alerts_to_digest(stored.id, alert_ids)
+            self.store.mark_digest_delivered(stored.id)
+            self.store.mark_notified(alert_ids)
+            stored.delivered = True
+        return stored
+
+    def _deliver_digest(self, digest: Digest, names: Dict[int, str]) -> bool:
+        if not self.notifiers:
+            # No external channel is configured; the digest is still recorded.
+            return True
+        delivered = False
+        for notifier in self.notifiers:
+            try:
+                notifier.send_digest(digest, names)
+                delivered = True
+            except NotificationError as exc:
+                log.warning("digest notifier %s failed: %s", notifier.name, exc)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning("digest notifier %s crashed: %s", notifier.name, exc)
+        return delivered
+
+    def _source_names(self) -> Dict[int, str]:
+        return {
+            source.id: source.name
+            for source in self.store.list_sources()
+            if source.id is not None
+        }
 
     def preview(self, alerts: Sequence[Alert]) -> List[str]:
         names = {source.id: source.name for source in self.store.list_sources()}

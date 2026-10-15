@@ -11,7 +11,7 @@ import threading
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from .models import Alert, Entry, Source
+from .models import Alert, Digest, Entry, Source
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -49,8 +49,20 @@ CREATE TABLE IF NOT EXISTS alerts (
     title TEXT NOT NULL DEFAULT '',
     link TEXT NOT NULL DEFAULT '',
     notified INTEGER NOT NULL DEFAULT 0,
+    digest_id INTEGER,
     created_at TEXT NOT NULL,
     UNIQUE (entry_id)
+);
+
+CREATE TABLE IF NOT EXISTS digests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    alert_count INTEGER NOT NULL DEFAULT 0,
+    severity TEXT NOT NULL DEFAULT 'info',
+    delivered INTEGER NOT NULL DEFAULT 0,
+    body TEXT NOT NULL DEFAULT '',
+    subject TEXT NOT NULL DEFAULT '',
+    omitted INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS check_runs (
@@ -79,7 +91,30 @@ class Store:
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Idempotently evolve pre-existing databases to the current schema."""
+        alert_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(alerts)").fetchall()
+        }
+        if "digest_id" not in alert_columns:
+            self._conn.execute("ALTER TABLE alerts ADD COLUMN digest_id INTEGER")
+
+        digest_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(digests)").fetchall()
+        }
+        if "subject" not in digest_columns:
+            self._conn.execute(
+                "ALTER TABLE digests ADD COLUMN subject TEXT NOT NULL DEFAULT ''"
+            )
+        if "omitted" not in digest_columns:
+            self._conn.execute(
+                "ALTER TABLE digests ADD COLUMN omitted INTEGER NOT NULL DEFAULT 0"
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -242,6 +277,74 @@ class Store:
             )
             self._conn.commit()
 
+    # -- digests ----------------------------------------------------------- #
+    def create_digest(self, digest: Digest) -> Digest:
+        """Persist a digest row.
+
+        Member alerts are *not* attached here: only a successfully delivered
+        digest claims its alerts (see :meth:`attach_alerts_to_digest`), so a
+        failed flush leaves the alerts pending for the next attempt.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                """INSERT INTO digests
+                   (created_at, alert_count, severity, delivered, body, subject, omitted)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    digest.created_at or _now(),
+                    digest.alert_count,
+                    digest.severity,
+                    1 if digest.delivered else 0,
+                    digest.body,
+                    digest.subject,
+                    digest.omitted,
+                ),
+            )
+            digest_id = cur.lastrowid
+            self._conn.commit()
+        return self.get_digest(digest_id)
+
+    def attach_alerts_to_digest(self, digest_id: int, alert_ids: List[int]) -> None:
+        """Mark ``alert_ids`` as consumed by an already delivered digest."""
+        if not alert_ids:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE alerts SET digest_id = ? WHERE id = ?",
+                [(digest_id, alert_id) for alert_id in alert_ids],
+            )
+            self._conn.commit()
+
+    def get_digest(self, digest_id: int) -> Optional[Digest]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM digests WHERE id = ?", (digest_id,)
+            ).fetchone()
+        return _row_to_digest(row) if row else None
+
+    def list_digests(self, limit: int = 100) -> List[Digest]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM digests ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [_row_to_digest(row) for row in rows]
+
+    def mark_digest_delivered(self, digest_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE digests SET delivered = 1 WHERE id = ?", (digest_id,)
+            )
+            self._conn.commit()
+
+    def list_undigested_alerts(self) -> List[Alert]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM alerts
+                   WHERE notified = 0 AND digest_id IS NULL
+                   ORDER BY id"""
+            ).fetchall()
+        return [_row_to_alert(row) for row in rows]
+
     # -- check runs / stats ------------------------------------------------ #
     def start_check_run(self) -> int:
         with self._lock:
@@ -277,6 +380,10 @@ class Store:
             warning = self._conn.execute(
                 "SELECT COUNT(*) FROM alerts WHERE severity = 'warning'"
             ).fetchone()[0]
+            digests = self._conn.execute("SELECT COUNT(*) FROM digests").fetchone()[0]
+            pending = self._conn.execute(
+                "SELECT COUNT(*) FROM alerts WHERE notified = 0 AND digest_id IS NULL"
+            ).fetchone()[0]
             last_run = self._conn.execute(
                 "SELECT * FROM check_runs ORDER BY id DESC LIMIT 1"
             ).fetchone()
@@ -287,6 +394,8 @@ class Store:
             "alerts": alerts,
             "alerts_critical": critical,
             "alerts_warning": warning,
+            "digests": digests,
+            "alerts_pending_digest": pending,
             "last_check": dict(last_run) if last_run else None,
         }
 
@@ -333,5 +442,19 @@ def _row_to_alert(row: sqlite3.Row) -> Alert:
         title=row["title"],
         link=row["link"],
         notified=bool(row["notified"]),
+        digest_id=row["digest_id"],
         created_at=row["created_at"],
+    )
+
+
+def _row_to_digest(row: sqlite3.Row) -> Digest:
+    return Digest(
+        id=row["id"],
+        created_at=row["created_at"],
+        alert_count=row["alert_count"],
+        severity=row["severity"],
+        delivered=bool(row["delivered"]),
+        body=row["body"],
+        subject=row["subject"],
+        omitted=row["omitted"],
     )

@@ -154,6 +154,49 @@ class OpenAppTests(AppTestCase):
         status, _ = self.request("GET", "/nope")
         self.assertEqual(status, 404)
 
+    def test_digests_empty(self):
+        status, body = self.request("GET", "/api/digests")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["digests"], [])
+
+    def test_digest_flush_when_nothing_pending(self):
+        status, body = self.request("POST", "/api/digest/flush")
+        self.assertEqual(status, 200)
+        self.assertIsNone(json.loads(body)["digest"])
+
+    def test_digest_flow(self):
+        self.engine.digest_mode = "digest"
+        self.request("POST", "/api/sources", {"name": "Example", "url": FEED_URL, "kind": "rss"})
+        status, body = self.request("POST", "/api/check")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["alerts_created"], 1)
+
+        status, body = self.request("POST", "/api/digest/flush")
+        self.assertEqual(status, 200)
+        digest = json.loads(body)["digest"]
+        self.assertIsNotNone(digest)
+        self.assertEqual(digest["alert_count"], 1)
+        self.assertEqual(digest["subject"], "API Deprecation Watchdog digest: 1 alert")
+        self.assertEqual(digest["omitted"], 0)
+        self.assertTrue(digest["delivered"])
+
+        status, body = self.request("GET", "/api/digests")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(json.loads(body)["digests"]), 1)
+
+        status, body = self.request("GET", "/api/digests/%d" % digest["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["id"], digest["id"])
+
+        status, body = self.request("GET", "/api/digests/999999")
+        self.assertEqual(status, 404)
+        self.assertIn("error", json.loads(body))
+
+    def test_dashboard_lists_digests(self):
+        status, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn("Recent digests", body)
+
 
 class SecuredAppTests(AppTestCase):
     token = "secret-token"
@@ -180,6 +223,16 @@ class SecuredAppTests(AppTestCase):
 
     def test_reads_stay_open(self):
         status, _ = self.request("GET", "/api/stats")
+        self.assertEqual(status, 200)
+
+    def test_digest_flush_requires_token(self):
+        status, _ = self.request("POST", "/api/digest/flush")
+        self.assertEqual(status, 401)
+        status, _ = self.request("POST", "/api/digest/flush", token="secret-token")
+        self.assertEqual(status, 200)
+
+    def test_digests_read_stays_open(self):
+        status, _ = self.request("GET", "/api/digests")
         self.assertEqual(status, 200)
 
 

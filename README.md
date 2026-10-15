@@ -29,6 +29,8 @@ actually use.
   `warning` or `info`.
 - **SQLite history** with content-hash de-duplication (no repeated alerts).
 - **Notifications** via Slack webhook, SMTP e-mail and console.
+- **Digest notifications** that batch alerts into a single grouped, severity-
+  ordered summary on a configurable cadence (`off`, `digest` or `both`).
 - **Web dashboard** and a JSON API.
 - **Operations-ready**: `GET /healthz`, background poller, non-root container,
   Helm chart, `linux/amd64` + `linux/arm64` image.
@@ -70,6 +72,9 @@ All configuration is environment based:
 | `SMTP_USER` / `SMTP_PASSWORD` | –  | SMTP credentials                                    |
 | `SMTP_FROM` / `SMTP_TO`  | –       | Sender and comma-separated recipients               |
 | `SMTP_STARTTLS`          | `true`  | Use STARTTLS                                        |
+| `DIGEST_MODE`            | `off`   | `off`, `digest` or `both` (see below)               |
+| `DIGEST_INTERVAL_SECONDS`| `86400` | Digest flush cadence (minimum `300`)                |
+| `DIGEST_MAX_ALERTS`      | `50`    | Maximum alerts rendered per digest message          |
 | `LOG_LEVEL`              | `INFO`  | Log verbosity                                       |
 
 ## HTTP API
@@ -84,8 +89,11 @@ All configuration is environment based:
 | DELETE | `/api/sources/:id` | Remove a source (token protected)         |
 | GET    | `/api/alerts`      | List alerts (`?limit=`, `?severity=`)     |
 | GET    | `/api/entries`     | List parsed entries (`?source_id=`)       |
+| GET    | `/api/digests`     | List digests, newest first (`?limit=`)    |
+| GET    | `/api/digests/:id` | Fetch one digest (`404` when unknown)     |
 | GET    | `/api/stats`       | Aggregate counters                        |
 | POST   | `/api/check`       | Run a scan now (token protected)          |
+| POST   | `/api/digest/flush`| Build and deliver a digest (token protected) |
 
 Register a source. The `POST /api/sources` payload accepts:
 
@@ -119,13 +127,45 @@ curl -X POST http://localhost:8080/api/sources \
        "kind":"statuspage","api_name":"Acme","tracked_versions":["v1"]}'
 ```
 
+## Digest notifications
+
+By default (`DIGEST_MODE=off`) every scan that finds new relevant entries sends
+one notification per batch. On a busy day that is a stream of small messages.
+Digest mode trades a little latency for a lot less noise: alerts are buffered
+and delivered as a single summary, grouped by source and ordered by severity
+(`critical` > `warning` > `info`), with newest alerts first. Each digest renders
+at most `DIGEST_MAX_ALERTS` alerts and states how many were omitted.
+
+| `DIGEST_MODE` | Behaviour                                                            |
+| ------------- | ------------------------------------------------------------------- |
+| `off`         | Immediate notification per scan (legacy default). No digest rows.   |
+| `digest`      | No immediate message; alerts wait for the next digest flush.        |
+| `both`        | Immediate message *and* the alerts are included in the next digest. |
+
+Flushes happen on their own timer (`DIGEST_INTERVAL_SECONDS`, default daily) and
+can be triggered on demand. A notifier failure is logged and leaves the digest
+undelivered without aborting the request or the scheduler; because alerts are
+only claimed by a digest once it has been delivered, a failed flush keeps them
+pending so the next flush retries them.
+
+```sh
+# Deliver a digest now; returns the created digest, or {"digest": null}.
+curl -X POST http://localhost:8080/api/digest/flush \
+  -H "Authorization: Bearer $API_TOKEN"
+
+# Browse delivered digests.
+curl http://localhost:8080/api/digests
+curl http://localhost:8080/api/digests/1
+```
+
 ## Deployment
 
 The Helm chart lives at `deploy/helm/api-deprecation-watchdog`. It renders the
 image as `image.repository@image.digest` for immutable releases, supports
 ingress through `ingress.enabled`, `ingress.host` and `ingress.className`,
 runs as a non-root user with a read-only root filesystem, and persists SQLite
-data on a PVC.
+data on a PVC. Digest mode is configured through `config.digestMode`,
+`config.digestIntervalSeconds` and `config.digestMaxAlerts` in `values.yaml`.
 
 ```sh
 helm install watchdog deploy/helm/api-deprecation-watchdog \

@@ -54,8 +54,26 @@ heterogeneous noise into a single prioritized alert stream.
   announcement is only alerted once.
 - **Notifications:** Slack incoming webhook, SMTP e-mail and a console channel;
   channels are optional and enabled through configuration.
-- **Web dashboard:** an accessible overview of sources, recent alerts and scan
-  statistics, plus a JSON API.
+- **Digest notifications:** an optional digest mode that buffers new alerts and
+  delivers one grouped summary per digest window instead of one message per
+  scan. Alerts are grouped by source, ordered by severity (critical > warning >
+  info) and then by source name, with newest alerts first inside each group; the
+  body is capped at `DIGEST_MAX_ALERTS` and states how many alerts were omitted.
+  Three modes are available through `DIGEST_MODE`:
+  - `off` (default) — immediate notification per scan batch, exactly the legacy
+    behaviour; no digest rows are created.
+  - `digest` — alerts are stored with `notified = 0` and no immediate message is
+    sent; a digest flush delivers a single summary and then marks the alerts
+    notified.
+  - `both` — the immediate notification is sent *and* the same alerts remain
+    eligible for the next digest.
+  Flushes run on their own timer (`DIGEST_INTERVAL_SECONDS`, minimum `300`,
+  default daily) or on demand via `POST /api/digest/flush`; a notifier failure
+  is logged and leaves the digest undelivered without aborting the request or
+  the scheduler. Alerts are only claimed by a digest after successful delivery,
+  so a failed flush leaves them pending and the next flush retries them.
+- **Web dashboard:** an accessible overview of sources, recent alerts, recent
+  digests, pending-digest alerts and scan statistics, plus a JSON API.
 - **Operations:** HTTP server on port `8080`, `GET /healthz`, background polling
   scheduler, optional bearer-token protection for mutating endpoints, non-root
   container, Helm chart, and a `linux/amd64` + `linux/arm64` image.
@@ -71,6 +89,9 @@ heterogeneous noise into a single prioritized alert stream.
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
 | GET    | `/api/alerts`     | List alerts, newest first                 |
 | GET    | `/api/entries`    | List parsed changelog entries             |
+| GET    | `/api/digests`    | List digests, newest first (`?limit=`)    |
+| GET    | `/api/digests/:id`| Fetch one digest (`404` when unknown)     |
+| POST   | `/api/digest/flush`| Build and deliver a digest (token protected) |
 | POST   | `/api/check`      | Run a scan now (token protected)          |
 | GET    | `/api/stats`      | Aggregate counters                        |
 
@@ -107,11 +128,14 @@ curl -X POST http://localhost:8080/api/sources \
 
 ## Next direction
 
+*Shipped:* **digest notifications** (see *Current capabilities*) — grouped,
+severity-ordered summaries delivered on a configurable cadence in addition to
+immediate alerts.
+
 1. **More source adapters:** GitHub releases and OpenAPI diff detection.
 2. **Smarter relevance:** semantic matching of version ranges (semver / date
    versions) and per-team severity rules.
-3. **Integrations:** GitHub/GitLab issues and Jira as delivery targets, plus
-   digest notifications.
+3. **Integrations:** GitHub/GitLab issues and Jira as delivery targets.
 4. **Multi-tenant onboarding:** organizations, API keys and shared source
    templates for the manual concierge phase.
 5. **Metrics export:** Prometheus endpoint for adoption and reliability

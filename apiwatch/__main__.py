@@ -50,7 +50,13 @@ def build_app(config: Config = None):
         seed_default_sources(store, default_sources())
     fetcher = Fetcher(timeout=config.fetch_timeout_seconds)
     notifiers: list = build_notifiers(config)
-    engine = Engine(store, fetcher, notifiers)
+    engine = Engine(
+        store,
+        fetcher,
+        notifiers,
+        digest_mode=config.digest_mode,
+        digest_max_alerts=config.digest_max_alerts,
+    )
     server = create_server(store, engine, config)
     return config, store, engine, server
 
@@ -60,14 +66,24 @@ def main() -> None:
     config, store, engine, server = build_app()
     scheduler = None
     if not config.disable_scheduler:
-        scheduler = Scheduler(engine, interval_seconds=config.poll_interval_seconds)
+        digest_interval = (
+            config.digest_interval_seconds
+            if config.digest_mode in ("digest", "both")
+            else None
+        )
+        scheduler = Scheduler(
+            engine,
+            interval_seconds=config.poll_interval_seconds,
+            digest_interval_seconds=digest_interval,
+        )
         scheduler.start()
     logging.getLogger("apiwatch").info(
-        "listening on %s:%s (data_dir=%s, scheduler=%s)",
+        "listening on %s:%s (data_dir=%s, scheduler=%s, digest=%s)",
         config.host,
         config.port,
         config.data_dir,
         "off" if scheduler is None else "on",
+        config.digest_mode,
     )
     try:
         server.serve_forever()
