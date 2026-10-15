@@ -70,6 +70,7 @@ def render_dashboard(
         ("critical", stats.get("alerts_critical", 0)),
         ("warning", stats.get("alerts_warning", 0)),
         ("pending digest", stats.get("alerts_pending_digest", 0)),
+        ("suppressed", stats.get("alerts_suppressed", 0)),
     ]
     card_html = "".join(
         '<div class="card"><div class="num">%s</div><div class="label">%s</div></div>'
@@ -87,6 +88,9 @@ def render_dashboard(
         if source.scan_jitter_seconds:
             # Show the deterministic offset window, e.g. ``3600s +0-300s``.
             label += " +0-%ds" % source.scan_jitter_seconds
+        if source.alert_cooldown_seconds:
+            # A compact, secret-free indicator that repeats are being coalesced.
+            label += " \u00b7 cooldown %ss" % source.alert_cooldown_seconds
         return label
 
     def _auth_indicator(source: Source) -> str:

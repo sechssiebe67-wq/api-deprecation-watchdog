@@ -114,6 +114,22 @@ heterogeneous noise into a single prioritized alert stream.
   source documenting a critical dependency keeps surfacing everything. Entries
   below the floor are still persisted, so history, `/api/entries` and
   content-hash de-duplication are unaffected.
+- **Per-source alert cooldown:** every source optionally carries an
+  `alert_cooldown_seconds` (a non-negative integer, default `None` / `0`, which
+  means no cooldown and is byte-for-byte equivalent to the pre-feature
+  behaviour). When set, an alert is only fanned out if no alert from the same
+  source was dispatched within the previous `alert_cooldown_seconds`. The
+  cooldown suppresses *notification only*: the entry and its alert are still
+  stored, keep `notified = 0` and remain eligible for the next digest flush, so
+  history, `/api/entries`, `/api/alerts`, de-duplication and digests are
+  unchanged — the same separation of persistence from alerting that
+  `min_severity` already uses. The last dispatch time is persisted on the source
+  row (`last_alert_at`) so a restart does not reset the window, and the number of
+  alerts held back is counted on the scan result as `alerts_suppressed`,
+  aggregated into `GET /api/stats`. A noisy dependency whose changelog
+  re-announces the same deprecation, or emits many near-identical entries in a
+  short window, therefore no longer floods Slack, e-mail or the webhook channel
+  with duplicates.
 - **Per-source scan intervals:** every source optionally carries a
   `scan_interval_seconds` (a positive integer, default `None`). When set, the
   background scheduler polls that source on its own cadence; when omitted the
@@ -181,7 +197,10 @@ heterogeneous noise into a single prioritized alert stream.
 - **Persistence:** SQLite store with de-duplication by content hash, so the same
   announcement is only alerted once.   The source table stores
   `scan_interval_seconds`, `scan_jitter_seconds` (integer or `NULL`, where
-  `NULL`/`0` means no jitter), `max_bytes` (integer or `NULL`), `headers` (JSON
+  `NULL`/`0` means no jitter), `max_bytes` (integer or `NULL`),
+  `retention_days` (integer or `NULL`), `alert_cooldown_seconds` (integer or
+  `NULL`), `last_alert_at` (text, the last dispatch time that anchors the
+  cooldown) and `alerts_suppressed` (integer, default `0`), `headers` (JSON
   text), `auth` (text),
   `extra_keywords` and `suppress_keywords` (JSON text),
   `failure_count` (integer, default `0`), `breaker_until` (text) and
@@ -264,9 +283,9 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
-| GET    | `/api/sources/:id`| Fetch one source (incl. `scan_jitter_seconds` and breaker fields) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `alert_cooldown_seconds`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `alert_cooldown_seconds`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
+| GET    | `/api/sources/:id`| Fetch one source (incl. `alert_cooldown_seconds`, `scan_jitter_seconds` and breaker fields) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's `failure_count` and `breaker_until` (token protected) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
@@ -277,7 +296,7 @@ heterogeneous noise into a single prioritized alert stream.
 | POST   | `/api/digest/flush`| Build and deliver a digest (token protected) |
 | POST   | `/api/check`      | Run a scan now (token protected)          |
 | POST   | `/api/prune`      | Prune entries past their retention window now (token protected); returns `entries_pruned` and `alerts_pruned` |
-| GET    | `/api/stats`      | Aggregate counters (incl. `sources_tripped`) |
+| GET    | `/api/stats`      | Aggregate counters (incl. `sources_tripped` and `alerts_suppressed`) |
 | GET    | `/api/export`     | Full JSON snapshot of sources, entries, alerts and digests (`?limit=`, default `1000`, max `10000`) |
 
 ## Data export
@@ -551,6 +570,51 @@ curl -X POST http://localhost:8080/api/prune \
 # -> {"entries_pruned": 12, "alerts_pruned": 9}
 ```
 
+## Alert cooldown
+
+A single dependency can be noisy: a changelog may re-announce the same
+deprecation in slightly different words, or emit several near-identical entries
+within a short window. Content-hash de-duplication (`store.py`) removes exact
+repeats, but near-duplicates still produce one alert each. The per-source
+`alert_cooldown_seconds` flattens that burst without weakening the audit trail.
+
+- **Field:** `alert_cooldown_seconds` is an optional non-negative integer on a
+  source (default `None` / `0`). `null`, omitted and `0` all mean "no cooldown"
+  and behave byte-for-byte like the pre-feature engine. A boolean, negative,
+  non-integer or non-numeric value is rejected with a `400` naming
+  `alert_cooldown_seconds`.
+- **Semantics:** in `Engine.dispatch`, an alert is only fanned out when no alert
+  from the same source was dispatched within the previous
+  `alert_cooldown_seconds`. The last dispatch time is persisted per source
+  (`sources.last_alert_at`) by the engine's clock, so the window survives a
+  process restart rather than resetting on reboot.
+- **Notification only:** a suppressed alert is *not* deleted or hidden. It is
+  stored with `notified = 0`, appears in `GET /api/alerts` and `GET /api/entries`,
+  participates in de-duplication as usual, and is still returned by
+  `Store.list_undigested_alerts()`, so the next digest flush (`POST
+  /api/digest/flush` or the digest timer) summarises it. This mirrors the
+  `min_severity` philosophy: persistence is separate from alerting.
+- **Accounting:** the number of alerts held back in a scan is reported as
+  `alerts_suppressed` on the `POST /api/check` / `ScanResult.to_dict()` payload
+  and aggregated across sources into `GET /api/stats`. The dashboard shows a
+  `suppressed` card and a compact `cooldown Ns` indicator in each source's
+  `Interval` cell; no secret value is ever rendered.
+- **Migration:** databases created before this feature gain
+  `alert_cooldown_seconds`, `last_alert_at` and `alerts_suppressed`
+  automatically. Existing rows read back with a `null` cooldown, a `null` last
+  dispatch time and a `0` suppressed count, so existing deployments are
+  unchanged.
+
+```sh
+# A noisy vendor that repeats the same deprecation every few minutes: store
+# every entry and alert it once, then coalesce repeats for an hour.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Noisy changelog","url":"https://noisy.example/changelog.json",
+       "kind":"json","api_name":"Noisy","tracked_versions":["v2"],
+       "alert_cooldown_seconds":3600}'
+```
+
 ## Routing
 
 The optional `notify_channels` field on a source selects which notifier channels
@@ -785,6 +849,16 @@ survive; a scheduler maintenance pass and the token-protected `POST /api/prune`
 endpoint prune on the chosen cadence, while `sources` and `digests` are never
 deleted. This is the next increment on top of the per-source history API and
 keeps a long-running deployment's SQLite file bounded.
+
+*Shipped:* **per-source alert cooldown** (see *Current capabilities* and
+*Alert cooldown*) — an optional `alert_cooldown_seconds` on each source that
+coalesces repeat notifications from a noisy dependency for a configurable
+window, persisting the last dispatch time so the window survives a restart and
+counting the held-back alerts as `alerts_suppressed`. Suppressed alerts stay
+stored with `notified = 0` and are summarised by the next digest, so persistence
+and alerting remain separate. This directly advances the *low noise / smarter
+relevance* goal: a re-announced deprecation no longer floods Slack, e-mail or
+the webhook channel with duplicates.
 
 1. **More source adapters:** additional structured feeds beyond the shipped
    GitHub and GitLab releases and OpenAPI adapters. *Partially shipped:*

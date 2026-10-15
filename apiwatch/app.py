@@ -187,6 +187,17 @@ def validate_source_payload(
             or retention_days <= 0
         ):
             raise ApiError(400, "'retention_days' must be a positive integer")
+    alert_cooldown_seconds = payload.get("alert_cooldown_seconds")
+    if alert_cooldown_seconds is not None:
+        # ``bool`` is an ``int`` subclass but is not a meaningful window.
+        if (
+            isinstance(alert_cooldown_seconds, bool)
+            or not isinstance(alert_cooldown_seconds, int)
+            or alert_cooldown_seconds < 0
+        ):
+            raise ApiError(
+                400, "'alert_cooldown_seconds' must be a non-negative integer"
+            )
     headers = payload.get("headers")
     if headers is None:
         headers = {}
@@ -229,6 +240,7 @@ def validate_source_payload(
         scan_jitter_seconds=scan_jitter,
         max_bytes=max_bytes,
         retention_days=retention_days,
+        alert_cooldown_seconds=alert_cooldown_seconds,
         headers=normalized_headers,
         auth=auth,
         extra_keywords=extra_keywords,
