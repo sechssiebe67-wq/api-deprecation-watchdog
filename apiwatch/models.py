@@ -57,6 +57,7 @@ class Source:
     scan_interval_seconds: Optional[int] = None
     scan_jitter_seconds: Optional[int] = None
     max_bytes: Optional[int] = None
+    retention_days: Optional[int] = None
     headers: Dict[str, str] = field(default_factory=dict)
     auth: Optional[str] = None
     extra_keywords: List[str] = field(default_factory=list)
@@ -98,6 +99,11 @@ class Source:
             # ``bool`` is an ``int`` subclass but is not a meaningful byte cap.
             if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
                 raise ValueError("max_bytes must be a positive integer")
+        retention = self.retention_days
+        if retention is not None:
+            # ``bool`` is an ``int`` subclass but is not a meaningful window.
+            if isinstance(retention, bool) or not isinstance(retention, int) or retention <= 0:
+                raise ValueError("retention_days must be a positive integer")
         self.truncated = bool(self.truncated)
         channels = self.notify_channels
         if channels is None:
@@ -207,6 +213,7 @@ class Source:
             "scan_interval_seconds": self.scan_interval_seconds,
             "scan_jitter_seconds": self.scan_jitter_seconds,
             "max_bytes": self.max_bytes,
+            "retention_days": self.retention_days,
             "headers": dict(self.headers),
             "auth": self.auth,
             "extra_keywords": list(self.extra_keywords),

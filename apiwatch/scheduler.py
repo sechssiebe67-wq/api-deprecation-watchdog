@@ -31,6 +31,7 @@ from .engine import Engine, ScanResult
 
 MIN_SCAN_INTERVAL_SECONDS = 30
 MIN_DIGEST_INTERVAL_SECONDS = 300
+MIN_MAINTENANCE_INTERVAL_SECONDS = 60
 
 log = logging.getLogger("apiwatch.scheduler")
 
@@ -41,6 +42,7 @@ class Scheduler:
         engine: Engine,
         interval_seconds: int = 3600,
         digest_interval_seconds: int = None,
+        maintenance_interval_seconds: int = None,
         clock: Optional[Callable[[], float]] = None,
     ) -> None:
         self.engine = engine
@@ -51,12 +53,19 @@ class Scheduler:
             )
         else:
             self.digest_interval = None
+        if maintenance_interval_seconds:
+            self.maintenance_interval = max(
+                MIN_MAINTENANCE_INTERVAL_SECONDS, int(maintenance_interval_seconds)
+            )
+        else:
+            self.maintenance_interval = None
         self._clock = clock or time.monotonic
         self._last_scan: Dict[int, float] = {}
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._thread = None
         self._digest_thread = None
+        self._maintenance_thread = None
 
     # -- cadence helpers --------------------------------------------------- #
     def effective_interval(self, source) -> int:
@@ -158,6 +167,11 @@ class Scheduler:
         if self.digest_interval is not None and self._digest_thread is None:
             self._digest_thread = threading.Thread(target=self._digest_loop, daemon=True)
             self._digest_thread.start()
+        if self.maintenance_interval is not None and self._maintenance_thread is None:
+            self._maintenance_thread = threading.Thread(
+                target=self._maintenance_loop, daemon=True
+            )
+            self._maintenance_thread.start()
 
     def _loop(self, run_immediately: bool) -> None:
         if run_immediately:
@@ -168,6 +182,10 @@ class Scheduler:
     def _digest_loop(self) -> None:
         while not self._stop.wait(self.digest_interval):
             self._digest_tick()
+
+    def _maintenance_loop(self) -> None:
+        while not self._stop.wait(self.maintenance_interval):
+            self._maintenance_tick()
 
     def _tick(self) -> None:
         try:
@@ -196,6 +214,19 @@ class Scheduler:
         except Exception:  # pragma: no cover - keep the loop alive
             log.exception("scheduled digest flush failed")
 
+    def _maintenance_tick(self) -> None:
+        try:
+            with self._lock:
+                counts = self.engine.prune()
+            if counts.get("entries_pruned") or counts.get("alerts_pruned"):
+                log.info(
+                    "scheduled prune: %d entries, %d alerts",
+                    counts.get("entries_pruned", 0),
+                    counts.get("alerts_pruned", 0),
+                )
+        except Exception:  # pragma: no cover - keep the loop alive
+            log.exception("scheduled prune failed")
+
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
@@ -204,3 +235,6 @@ class Scheduler:
         if self._digest_thread is not None:
             self._digest_thread.join(timeout=5)
             self._digest_thread = None
+        if self._maintenance_thread is not None:
+            self._maintenance_thread.join(timeout=5)
+            self._maintenance_thread = None

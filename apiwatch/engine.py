@@ -65,6 +65,7 @@ class Engine:
         breaker_threshold: int = 5,
         breaker_cooldown_seconds: int = 1800,
         fetch_max_bytes: int = 2_000_000,
+        retention_days: int = 0,
         clock: Optional[Callable[[], datetime]] = None,
     ) -> None:
         self.store = store
@@ -76,6 +77,7 @@ class Engine:
         self.breaker_threshold = max(1, int(breaker_threshold))
         self.breaker_cooldown_seconds = max(1, int(breaker_cooldown_seconds))
         self.fetch_max_bytes = max(1, int(fetch_max_bytes))
+        self.retention_days = max(0, int(retention_days))
         self._clock = clock
 
     # -- circuit breaker --------------------------------------------------- #
@@ -270,6 +272,20 @@ class Engine:
         return self.scan_sources(
             self.store.list_sources(enabled_only=True), notify=notify
         )
+
+    def prune(self) -> dict:
+        """Prune entries past the effective retention window and report counts.
+
+        The per-source overrides come from each source's stored
+        ``retention_days``; sources without one fall back to the global
+        ``RETENTION_DAYS``. Sources and digests are never removed.
+        """
+        overrides = {
+            source.id: source.retention_days
+            for source in self.store.list_sources()
+            if source.id is not None and source.retention_days is not None
+        }
+        return self.store.prune_entries(self.retention_days, overrides, self.now())
 
     def dispatch(self, alerts: List[Alert], mark: bool = True) -> None:
         """Fan alerts out to the notifiers each source is routed to.

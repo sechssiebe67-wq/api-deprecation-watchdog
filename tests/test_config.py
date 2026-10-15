@@ -36,6 +36,25 @@ class DigestConfigTests(unittest.TestCase):
         self.assertEqual(Config.from_env({"DIGEST_MAX_ALERTS": "0"}).digest_max_alerts, 1)
 
 
+class RetentionConfigTests(unittest.TestCase):
+    def test_defaults_disabled(self):
+        config = Config.from_env({})
+        self.assertEqual(config.retention_days, 0)
+        self.assertEqual(config.maintenance_interval_seconds, 86400)
+
+    def test_reads_retention_days(self):
+        config = Config.from_env({"RETENTION_DAYS": "14"})
+        self.assertEqual(config.retention_days, 14)
+
+    def test_negative_retention_days_floored(self):
+        config = Config.from_env({"RETENTION_DAYS": "-5"})
+        self.assertEqual(config.retention_days, 0)
+
+    def test_maintenance_interval_floor(self):
+        config = Config.from_env({"MAINTENANCE_INTERVAL_SECONDS": "10"})
+        self.assertEqual(config.maintenance_interval_seconds, 300)
+
+
 class WebhookConfigTests(unittest.TestCase):
     def test_defaults_to_none(self):
         self.assertIsNone(Config.from_env({}).webhook_url)

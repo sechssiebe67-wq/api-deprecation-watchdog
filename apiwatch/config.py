@@ -16,6 +16,8 @@ DIGEST_MODES = ("off", "digest", "both")
 DIGEST_INTERVAL_MIN_SECONDS = 300
 BREAKER_THRESHOLD_MIN = 1
 BREAKER_COOLDOWN_MIN_SECONDS = 60
+RETENTION_DAYS_MIN = 0
+MAINTENANCE_INTERVAL_MIN_SECONDS = 300
 FETCH_MAX_BYTES_DEFAULT = 2_000_000
 FETCH_MAX_BYTES_MIN = 1024
 
@@ -96,6 +98,8 @@ class Config:
     breaker_threshold: int = 5
     breaker_cooldown_seconds: int = 1800
     fetch_max_bytes: int = FETCH_MAX_BYTES_DEFAULT
+    retention_days: int = 0
+    maintenance_interval_seconds: int = 86400
 
     @property
     def db_path(self) -> str:
@@ -143,4 +147,12 @@ class Config:
                 int(env.get("BREAKER_COOLDOWN_SECONDS") or 1800),
             ),
             fetch_max_bytes=_fetch_max_bytes(env.get("FETCH_MAX_BYTES")),
+            retention_days=max(
+                RETENTION_DAYS_MIN,
+                int(env.get("RETENTION_DAYS") or 0),
+            ),
+            maintenance_interval_seconds=max(
+                MAINTENANCE_INTERVAL_MIN_SECONDS,
+                int(env.get("MAINTENANCE_INTERVAL_SECONDS") or 86400),
+            ),
         )

@@ -160,6 +160,8 @@ All configuration is environment based:
 | `DIGEST_MODE`            | `off`   | `off`, `digest` or `both` (see below)               |
 | `DIGEST_INTERVAL_SECONDS`| `86400` | Digest flush cadence (minimum `300`)                |
 | `DIGEST_MAX_ALERTS`      | `50`    | Maximum alerts rendered per digest message          |
+| `RETENTION_DAYS`         | `0`     | Global entry retention window in days; `0` disables pruning (floored at `0`); per-source `retention_days` overrides it |
+| `MAINTENANCE_INTERVAL_SECONDS` | `86400` | Background prune cadence (minimum `300`)      |
 | `LOG_LEVEL`              | `INFO`  | Log verbosity                                       |
 
 ## HTTP API
@@ -168,9 +170,9 @@ All configuration is environment based:
 | ------ | ------------------ | ----------------------------------------- |
 | GET    | `/healthz`         | Liveness / readiness probe                |
 | GET    | `/`                | HTML dashboard                            |
-| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
 | POST   | `/api/sources`     | Register a source (token protected)       |
-| GET    | `/api/sources/:id` | Fetch one source (incl. `scan_jitter_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources/:id` | Fetch one source (incl. `scan_jitter_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's breaker state (token protected) |
 | DELETE | `/api/sources/:id` | Remove a source (token protected)         |
@@ -181,6 +183,7 @@ All configuration is environment based:
 | GET    | `/api/stats`       | Aggregate counters (incl. `sources_tripped`) |
 | GET    | `/api/export`      | Full JSON snapshot of sources, entries, alerts and digests (`?limit=`) |
 | POST   | `/api/check`       | Run a scan now (token protected)          |
+| POST   | `/api/prune`       | Prune entries past their retention window now (token protected); returns `{"entries_pruned": N, "alerts_pruned": M}` |
 | POST   | `/api/digest/flush`| Build and deliver a digest (token protected) |
 
 Register a source. The `POST /api/sources` payload accepts:
@@ -200,6 +203,7 @@ Register a source. The `POST /api/sources` payload accepts:
 | `scan_interval_seconds` | no  | Positive integer override for this source's polling cadence; omitted keeps the global `POLL_INTERVAL_SECONDS` |
 | `scan_jitter_seconds` | no     | Non-negative integer window (seconds) added as a deterministic, id-derived offset to this source's due time so its polls are spread; omitted, `null` or `0` means no jitter |
 | `max_bytes`        | no       | Positive integer cap on the response body bytes read and stored for this source; omitted or `null` uses the global `FETCH_MAX_BYTES` |
+| `retention_days`   | no       | Positive integer retention window in days for this source's entries; omitted or `null` inherits the global `RETENTION_DAYS`. `0`, negative, non-integer and boolean values are rejected with a `400` |
 | `headers`          | no       | JSON object of header name to string value sent on every fetch (merged over the defaults; names normalized case-insensitively) |
 | `auth`             | no       | `"user:password"` HTTP Basic credentials; adds `Authorization: Basic <base64>` |
 | `extra_keywords`   | no       | List of terms that extend the relevance vocabulary for this source and raise a matching entry to `critical` (trimmed, lower-cased, default `[]`) |
@@ -582,6 +586,46 @@ The dashboard shows a `Health` column — `ok`, `N failures` or
 `tripped until <time>` — with a `Reset` button for tripped sources. It never
 renders header values or credentials.
 
+## Retention
+
+A long-running deployment should not grow its SQLite database without bound, so
+entries and the alerts that reference them can be pruned once they fall outside a
+retention window. Set the deployment-wide window with `RETENTION_DAYS` (default
+`0`, meaning disabled and floored at `0`) and override it per source with the
+optional positive integer `retention_days`.
+
+The effective window for a source is its own `retention_days` when set, otherwise
+the global `RETENTION_DAYS`. A window of `0` disables pruning for that source.
+The background scheduler runs a prune pass every `MAINTENANCE_INTERVAL_SECONDS`
+(default `86400`, minimum `300`); operators can also trigger one immediately:
+
+```sh
+# Prune now (token protected when API_TOKEN is set).
+curl -X POST http://localhost:8080/api/prune \
+  -H "Authorization: Bearer $API_TOKEN"
+# -> {"entries_pruned": 12, "alerts_pruned": 9}
+```
+
+Pruning deletes entries whose `created_at` is older than the effective window
+and deletes the alerts whose `entry_id` was pruned. **It never deletes rows from
+`sources` or `digests`**, so the source registry, delivered digests and the
+aggregate `stats` survive a prune; only the per-source entry history (and the
+alerts derived from it) is bounded. An entry whose retention window is unset and
+whose global default is `0` is always kept. Databases created before this feature
+are migrated automatically and read back with `retention_days` as `null`.
+
+```sh
+# Keep the global history bounded at 90 days, but trim a chatty dependency to 7.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Chatty","url":"https://chatty.example/changelog.json",
+       "kind":"json","retention_days":7}'
+```
+
+The dashboard's `Retention` column shows a source's `retention_days` as a
+compact `Nd` label (for example `7d`) or `–` when it is unset and inherits the
+global default; it never renders headers or credentials.
+
 ## Digest notifications
 
 By default (`DIGEST_MODE=off`) every scan that finds new relevant entries sends
@@ -622,8 +666,10 @@ runs as a non-root user with a read-only root filesystem, and persists SQLite
 data on a PVC. Digest mode is configured through `config.digestMode`,
 `config.digestIntervalSeconds` and `config.digestMaxAlerts` in `values.yaml`;
 the circuit breaker through `config.breakerThreshold` and
-`config.breakerCooldownSeconds`; and the fetch size cap through
-`config.fetchMaxBytes` (`FETCH_MAX_BYTES`).
+`config.breakerCooldownSeconds`; the fetch size cap through
+`config.fetchMaxBytes` (`FETCH_MAX_BYTES`); and entry retention through
+`config.retentionDays` (`RETENTION_DAYS`) and
+`config.maintenanceIntervalSeconds` (`MAINTENANCE_INTERVAL_SECONDS`).
 
 ```sh
 helm install watchdog deploy/helm/api-deprecation-watchdog \

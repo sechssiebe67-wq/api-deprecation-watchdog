@@ -93,6 +93,11 @@ config:
   # for this many seconds.
   breakerThreshold: 5
   breakerCooldownSeconds: 1800
+  # Entry retention: prune entries (and their alerts) older than this many days.
+  # 0 disables pruning; per-source `retention_days` overrides it.
+  retentionDays: 0
+  # Background prune cadence in seconds (floored at 300).
+  maintenanceIntervalSeconds: 86400
 
 # Optional plain-text environment values.
 extraEnv: []
