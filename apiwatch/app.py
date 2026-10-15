@@ -130,6 +130,17 @@ def validate_source_payload(
             "'notify_channels' entries must be one of %s or 'all'"
             % ", ".join(NOTIFY_CHANNELS),
         )
+    scan_interval = payload.get("scan_interval_seconds")
+    if scan_interval is not None:
+        # ``bool`` is an ``int`` subclass but is not a meaningful interval.
+        if (
+            isinstance(scan_interval, bool)
+            or not isinstance(scan_interval, int)
+            or scan_interval <= 0
+        ):
+            raise ApiError(
+                400, "'scan_interval_seconds' must be a positive integer"
+            )
     return Source(
         name=name,
         url=url,
@@ -140,6 +151,7 @@ def validate_source_payload(
         selector=selector,
         min_severity=min_severity.strip().lower(),
         notify_channels=normalized_channels,
+        scan_interval_seconds=scan_interval,
     )
 
 
@@ -303,7 +315,16 @@ class WatchdogHandler(BaseHTTPRequestHandler):
         sources = self.store.list_sources()
         alerts = self.store.list_alerts(limit=50)
         digests = self.store.list_digests(limit=20)
-        self._send_html(200, render_dashboard(stats, sources, alerts, digests))
+        self._send_html(
+            200,
+            render_dashboard(
+                stats,
+                sources,
+                alerts,
+                digests,
+                default_interval=self.config.poll_interval_seconds,
+            ),
+        )
 
     def _create_source(self) -> None:
         if not self._authorized():

@@ -41,6 +41,11 @@ actually use.
 - **Per-source severity floor**: each source has a `min_severity` (default
   `info`) that suppresses alerts below the chosen level while still recording
   the entries.
+- **Per-source scan intervals**: each source has an optional
+  `scan_interval_seconds` that overrides the global `POLL_INTERVAL_SECONDS`
+  cadence, so a volatile dependency can be polled every 15 minutes while a
+  stable SDK is checked once a day. Omitting it keeps the global cadence; a
+  manual `POST /api/check` always scans every enabled source.
 - **SQLite history** with content-hash de-duplication (no repeated alerts).
 - **Notifications** via Slack webhook, SMTP e-mail and console.
 - **Per-source notification routing** via a `notify_channels` list, so a chatty
@@ -48,7 +53,8 @@ actually use.
   to e-mail. `all` (the default) keeps the fan-out to every notifier.
 - **Digest notifications** that batch alerts into a single grouped, severity-
   ordered summary on a configurable cadence (`off`, `digest` or `both`).
-- **Web dashboard** and a JSON API.
+- **Web dashboard** with an `Interval` column showing each source's cadence (or
+  the global default) and a JSON API.
 - **Operations-ready**: `GET /healthz`, background poller, non-root container,
   Helm chart, `linux/amd64` + `linux/arm64` image.
 
@@ -79,7 +85,7 @@ All configuration is environment based:
 | `PORT`                   | `8080`  | HTTP port                                           |
 | `HOST`                   | `0.0.0.0` | HTTP bind address                                 |
 | `DATA_DIR`               | `/data` | Directory for `watchdog.db` (SQLite)                |
-| `POLL_INTERVAL_SECONDS`  | `3600`  | Background scan interval                            |
+| `POLL_INTERVAL_SECONDS`  | `3600`  | Global background scan interval; per-source `scan_interval_seconds` overrides it |
 | `FETCH_TIMEOUT_SECONDS`  | `20`    | Per-source HTTP timeout                             |
 | `DISABLE_SCHEDULER`      | `false` | Disable background polling                          |
 | `SEED_SOURCES`           | `true`  | Seed default sources on first start                 |
@@ -127,6 +133,7 @@ Register a source. The `POST /api/sources` payload accepts:
 | `enabled`          | no       | Whether the scheduler polls it (default `true`)               |
 | `min_severity`     | no       | Lowest severity that creates an alert: `critical`, `warning` or `info` (default `info`) |
 | `notify_channels`  | no       | Channels that receive this source's alerts: a list of `console`, `slack`, `email` or `all` (default `all`) |
+| `scan_interval_seconds` | no  | Positive integer override for this source's polling cadence; omitted keeps the global `POLL_INTERVAL_SECONDS` |
 
 For `html`, `selector` is a CSS-like simple selector (optional tag, `#id`,
 `.class`, or a combination). It matches a block when the block or an ancestor
@@ -191,6 +198,18 @@ behaviour). An empty list is treated as `all`. The same routing applies to
 digest delivery: each notifier receives a digest containing only the alerts
 routed to it. Set `NOTIFY_CHANNELS` to change the default for sources that omit
 the field. Unknown channel names are rejected with `400`.
+
+`scan_interval_seconds` overrides the global `POLL_INTERVAL_SECONDS` cadence for
+one source. It is a positive integer number of seconds; omitting it (or sending
+`null`) leaves the source on the global interval, so existing registrations and
+databases keep their behaviour. A zero, negative, non-integer or non-numeric
+value is rejected with a `400` naming the field. The background scheduler tracks
+the last scan time per source and only scans a source once its effective
+interval has elapsed, waking at the smallest effective interval among the
+enabled sources so a 15-minute source is not throttled by an hourly global
+timer. Both the per-source value and the global default are floored at 30
+seconds. A manual `POST /api/check` ignores the intervals and scans every
+enabled source in one run.
 
 `GET /api/sources/:id/entries` returns the entries recorded for one source,
 newest first (ordered by `created_at` then `id`, both descending) and capped by
@@ -259,6 +278,14 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Payments API","url":"https://status.payments.example/api/v2/incidents.json",
        "kind":"statuspage","api_name":"Payments","tracked_versions":["v1"],
        "min_severity":"warning","notify_channels":["email"]}'
+
+# Volatile dependency: poll every 15 minutes instead of the global hour.
+# The scheduler scans it four times as often as a source with no interval.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Payments API","url":"https://status.payments.example/api/v2/incidents.json",
+       "kind":"statuspage","api_name":"Payments","tracked_versions":["v1"],
+       "min_severity":"warning","scan_interval_seconds":900}'
 ```
 
 ## Digest notifications

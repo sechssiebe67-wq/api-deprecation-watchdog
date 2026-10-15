@@ -127,9 +127,11 @@ class Engine:
             # "digest": hold the alerts back for the next digest flush.
         return result
 
-    def scan_all(self, notify: bool = True) -> ScanResult:
+    def scan_sources(
+        self, sources: Sequence[Source], notify: bool = True
+    ) -> ScanResult:
+        """Scan a specific set of sources, aggregating the per-source results."""
         result = ScanResult()
-        sources = self.store.list_sources(enabled_only=True)
         for source in sources:
             sub = self.scan_source(source, notify=notify)
             result.sources_checked += sub.sources_checked
@@ -142,6 +144,17 @@ class Engine:
             if sub.errors:
                 log.warning("scan errors for %s: %s", source.name, sub.errors)
         return result
+
+    def scan_all(self, notify: bool = True) -> ScanResult:
+        """Scan every enabled source, regardless of per-source intervals.
+
+        Manual checks (`POST /api/check`) use this so they always cover the whole
+        registry; the background scheduler instead scans only the sources whose
+        effective interval has elapsed.
+        """
+        return self.scan_sources(
+            self.store.list_sources(enabled_only=True), notify=notify
+        )
 
     def dispatch(self, alerts: List[Alert], mark: bool = True) -> None:
         """Fan alerts out to the notifiers each source is routed to.

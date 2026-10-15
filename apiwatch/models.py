@@ -22,12 +22,18 @@ class Source:
     selector: Optional[str] = None
     min_severity: str = "info"
     notify_channels: List[str] = field(default_factory=lambda: [ALL_CHANNELS])
+    scan_interval_seconds: Optional[int] = None
     id: Optional[int] = None
     created_at: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.min_severity not in SEVERITIES:
             raise ValueError("min_severity must be one of %s" % ", ".join(SEVERITIES))
+        interval = self.scan_interval_seconds
+        if interval is not None:
+            # ``bool`` is an ``int`` subclass but is not a meaningful interval.
+            if isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0:
+                raise ValueError("scan_interval_seconds must be a positive integer")
         channels = self.notify_channels
         if channels is None:
             channels = [ALL_CHANNELS]
@@ -61,6 +67,7 @@ class Source:
             "selector": self.selector,
             "min_severity": self.min_severity,
             "notify_channels": list(self.notify_channels),
+            "scan_interval_seconds": self.scan_interval_seconds,
             "created_at": self.created_at,
         }
 
