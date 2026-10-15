@@ -1,0 +1,40 @@
+name: AI Issue on Merge
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ai-issue-on-main
+  cancel-in-progress: false
+
+jobs:
+  create-issue:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Reset previous cycle on explicit reset commit
+        if: github.event_name == 'push' && startsWith(github.event.head_commit.message, 'chore(reset):')
+        env:
+          GH_TOKEN: ${{ secrets.TAMBINOS_PAT }}
+        run: python3 .github/scripts/reset_cycle.py
+
+      - name: Generate and create the next issue
+        env:
+          # A PAT is necessary: issues created with GITHUB_TOKEN do not start
+          # the next workflow. Its owner must be able to assign issues.
+          GH_TOKEN: ${{ secrets.TAMBINOS_PAT }}
+          DEEPSEEK_API_KEY: ${{ secrets.GURKE_DEEPSEEK_API_KEY || secrets.DEEPSEEK_API_KEY }}
+          ASSIGNEE: ${{ vars.AI_ASSIGNEE || github.repository_owner }}
+          CYCLE_KEY: ${{ github.event_name == 'push' && github.sha || github.run_id }}
+        run: python3 .github/scripts/create_issue.py
