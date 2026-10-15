@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import List, Optional
 from urllib.parse import parse_qs, urlparse
@@ -27,6 +28,8 @@ from .store import Store
 log = logging.getLogger("apiwatch.app")
 
 MAX_BODY_BYTES = 64 * 1024
+EXPORT_DEFAULT_LIMIT = 1000
+EXPORT_MAX_LIMIT = 10000
 
 _GITHUB_HTML_RE = re.compile(
     r"^https?://(?:www\.)?github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"
@@ -294,6 +297,9 @@ class WatchdogHandler(BaseHTTPRequestHandler):
         if method == "GET" and path == "/api/stats":
             self._send_json(200, self.store.stats())
             return
+        if method == "GET" and path == "/api/export":
+            self._export(query)
+            return
         if method == "GET" and path == "/api/sources":
             self._send_json(200, {"sources": [s.to_dict() for s in self.store.list_sources()]})
             return
@@ -376,6 +382,24 @@ class WatchdogHandler(BaseHTTPRequestHandler):
             ),
         )
 
+    def _export(self, query: dict) -> None:
+        """Return a read-only snapshot of every stored collection.
+
+        ``?limit=`` caps entries, alerts and digests independently (default
+        :data:`EXPORT_DEFAULT_LIMIT`, maximum :data:`EXPORT_MAX_LIMIT`); sources
+        are always returned in full so the snapshot is self-describing.
+        """
+        limit = _export_limit(query)
+        payload = {
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "stats": self.store.stats(),
+            "sources": [s.to_dict() for s in self.store.list_sources()],
+            "entries": [e.to_dict() for e in self.store.list_entries(limit=limit)],
+            "alerts": [a.to_dict() for a in self.store.list_alerts(limit=limit)],
+            "digests": [d.to_dict() for d in self.store.list_digests(limit=limit)],
+        }
+        self._send_json(200, payload)
+
     def _create_source(self) -> None:
         if not self._authorized():
             raise ApiError(401, "unauthorized")
@@ -441,6 +465,19 @@ def _int_param(query: dict, key: str, default: Optional[int]):
         return int(query[key][0])
     except (TypeError, ValueError):
         raise ApiError(400, "invalid %s" % key)
+
+
+def _export_limit(query: dict) -> int:
+    """Resolve the ``?limit=`` for ``/api/export`` or raise ``invalid limit``."""
+    if "limit" not in query:
+        return EXPORT_DEFAULT_LIMIT
+    try:
+        limit = int(query["limit"][0])
+    except (TypeError, ValueError):
+        raise ApiError(400, "invalid limit")
+    if limit < 1 or limit > EXPORT_MAX_LIMIT:
+        raise ApiError(400, "invalid limit")
+    return limit
 
 
 def create_server(

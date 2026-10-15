@@ -191,8 +191,16 @@ heterogeneous noise into a single prioritized alert stream.
   is logged and leaves the digest undelivered without aborting the request or
   the scheduler. Alerts are only claimed by a digest after successful delivery,
   so a failed flush leaves them pending and the next flush retries them.
+- **Data export:** a token-free, read-only `GET /api/export` that returns a
+  single JSON snapshot of the whole watchdog state — `generated_at`, `stats`,
+  `sources`, `entries`, `alerts` and `digests` — for offline analysis, incident
+  reports or feeding other tools without writing a custom client. An optional
+  `?limit=` (default `1000`, maximum `10000`) caps entries, alerts and digests
+  independently while sources are always returned in full. The dashboard header
+  carries a `Download JSON` link pointing at the same endpoint.
 - **Web dashboard:** an accessible overview of sources, recent alerts, recent
-  digests, pending-digest alerts and scan statistics, plus a JSON API.
+  digests, pending-digest alerts and scan statistics, plus a JSON API and a
+  `Download JSON` link to the export endpoint.
 - **Operations:** HTTP server on port `8080`, `GET /healthz`, background polling
   scheduler, optional bearer-token protection for mutating endpoints, non-root
   container, Helm chart, and a `linux/amd64` + `linux/arm64` image.
@@ -216,6 +224,42 @@ heterogeneous noise into a single prioritized alert stream.
 | POST   | `/api/digest/flush`| Build and deliver a digest (token protected) |
 | POST   | `/api/check`      | Run a scan now (token protected)          |
 | GET    | `/api/stats`      | Aggregate counters (incl. `sources_tripped`) |
+| GET    | `/api/export`     | Full JSON snapshot of sources, entries, alerts and digests (`?limit=`, default `1000`, max `10000`) |
+
+## Data export
+
+`GET /api/export` returns one read-only JSON document containing the whole
+watchdog state so a team can snapshot it for offline analysis, incident reports
+or feed it into other tools without writing a custom client. The endpoint is
+token-free, consistent with the other read-only routes (`/api/sources`,
+`/api/alerts`, `/api/entries`), and never mutates the store.
+
+The payload is:
+
+```json
+{
+  "generated_at": "2024-05-01T12:00:00+00:00",
+  "stats": { "sources": 2, "entries": 10, "...": "..." },
+  "sources": [ { "id": 1, "name": "Stripe", "...": "..." } ],
+  "entries": [ { "id": 1, "title": "v1 deprecated", "...": "..." } ],
+  "alerts": [ { "id": 1, "severity": "critical", "...": "..." } ],
+  "digests": [ { "id": 1, "alert_count": 3, "...": "..." } ]
+}
+```
+
+- `generated_at` is the snapshot time as an ISO-8601 UTC timestamp.
+- `stats` is exactly the `store.stats()` payload also served by
+  `GET /api/stats`, so the snapshot self-describes the counts even when a
+  collection is truncated.
+- `sources`, `entries`, `alerts` and `digests` are lists of the existing
+  `to_dict()` forms, newest first where the store already orders them.
+
+The optional `?limit=` query parameter caps `entries`, `alerts` and `digests`
+*independently*. It defaults to `1000` and must be an integer between `1` and
+`10000`; a non-integer or out-of-range value is rejected with
+`400 {"error": "invalid limit"}`. `sources` are always returned in full, so the
+snapshot never hides which dependencies are configured. The dashboard header has
+a `Download JSON` link for one-click access.
 
 ## Selector syntax
 
@@ -492,8 +536,15 @@ statuspages, internal changelogs) can be monitored without forking the service.
 `BREAKER_COOLDOWN_SECONDS` policy, skip-rather-than-retry semantics in the
 scheduler and `Engine.scan_all()`, a token-protected
 `POST /api/sources/:id/reset`, a `sources_tripped` stat and a dashboard
-`Health` column, so one flaky or hostile dependency can no longer starve the
-shared poll loop.
+  `Health` column, so one flaky or hostile dependency can no longer starve the
+  shared poll loop.
+
+*Shipped:* **JSON data export** (see *Current capabilities* and *Data export*) —
+a token-free, read-only `GET /api/export` that returns one JSON snapshot of
+`stats`, `sources`, `entries`, `alerts` and `digests` with an independent
+`?limit=` (default `1000`, max `10000`), plus a `Download JSON` dashboard link.
+This gives teams an offline-analysis and incident-report path without a custom
+client and is a first step toward the *Metrics export* item below.
 
 1. **More source adapters:** additional structured feeds beyond the shipped
    GitHub and GitLab releases and OpenAPI adapters. *Partially shipped:*
@@ -511,7 +562,9 @@ shared poll loop.
 4. **Multi-tenant onboarding:** organizations, API keys and shared source
    templates for the manual concierge phase.
 5. **Metrics export:** Prometheus endpoint for adoption and reliability
-   monitoring.
+   monitoring. *Partially shipped:* the JSON `GET /api/export` endpoint already
+   exposes `stats` and every stored collection for offline tooling; a
+   Prometheus-format scrape endpoint remains to be built.
 
 ## Architecture
 

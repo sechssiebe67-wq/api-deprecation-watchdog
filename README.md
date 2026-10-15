@@ -75,7 +75,13 @@ actually use.
 - **Web dashboard** with an `Interval` column showing each source's cadence (or
   the global default), an `Auth` column showing a lock/header-count indicator
   (never the secret values), a `Health` column (`ok`, `N failures` or
-  `tripped until <time>` with a `Reset` action) and a JSON API.
+  `tripped until <time>` with a `Reset` action), a JSON API and a
+  `Download JSON` link that snapshots the full state through `/api/export`.
+- **JSON data export**: a read-only `GET /api/export` returns one document with
+  `generated_at`, `stats`, `sources`, `entries`, `alerts` and `digests` for
+  offline analysis, incident reports or feeding other tools. An optional
+  `?limit=` (default `1000`, maximum `10000`) caps entries, alerts and digests
+  independently; sources are always complete.
 - **Operations-ready**: `GET /healthz`, background poller, non-root container,
   Helm chart, `linux/amd64` + `linux/arm64` image.
 
@@ -142,6 +148,7 @@ All configuration is environment based:
 | GET    | `/api/digests`     | List digests, newest first (`?limit=`)    |
 | GET    | `/api/digests/:id` | Fetch one digest (`404` when unknown)     |
 | GET    | `/api/stats`       | Aggregate counters (incl. `sources_tripped`) |
+| GET    | `/api/export`      | Full JSON snapshot of sources, entries, alerts and digests (`?limit=`) |
 | POST   | `/api/check`       | Run a scan now (token protected)          |
 | POST   | `/api/digest/flush`| Build and deliver a digest (token protected) |
 
@@ -310,6 +317,38 @@ respectively. The route matches the `/entries` suffix, so `GET` and
 # The stored history for source 1, newest first, at most 20 entries.
 curl "http://localhost:8080/api/sources/1/entries?limit=20"
 ```
+
+### Export
+
+`GET /api/export` returns a single read-only JSON document containing the whole
+watchdog state, so you can snapshot it for offline analysis, incident reports or
+feed it into other tools without writing a custom client. It requires no token
+(like the other read endpoints) and never mutates the store.
+
+```sh
+# Download the full state (up to 1000 entries, alerts and digests).
+curl http://localhost:8080/api/export > watchdog-export.json
+
+# Cap each collection independently while still returning every source.
+curl "http://localhost:8080/api/export?limit=5"
+```
+
+The payload keys are:
+
+| Key            | Contents                                                       |
+| -------------- | ------------------------------------------------------------- |
+| `generated_at` | Snapshot time as an ISO-8601 UTC timestamp                     |
+| `stats`        | The same aggregate counters as `GET /api/stats`                |
+| `sources`      | Every source, in full, as its `to_dict()` form                 |
+| `entries`      | Parsed entries, newest first, capped by `?limit=`              |
+| `alerts`       | Alerts, newest first, capped by `?limit=`                      |
+| `digests`      | Digests, newest first, capped by `?limit=`                     |
+
+`?limit=` defaults to `1000`, must be an integer between `1` and `10000`, and is
+applied to `entries`, `alerts` and `digests` independently; `sources` are always
+returned in full. A non-integer or out-of-range value returns
+`400 {"error": "invalid limit"}`. The dashboard header also offers a
+`Download JSON` link to the same endpoint.
 
 ```sh
 # HTML changelog, narrowed to deprecation headings.
