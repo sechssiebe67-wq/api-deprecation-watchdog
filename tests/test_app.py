@@ -8,6 +8,7 @@ from apiwatch.app import create_server, validate_source_payload
 from apiwatch.config import Config
 from apiwatch.engine import Engine
 from apiwatch.fetcher import FakeFetcher
+from apiwatch.models import Entry
 from apiwatch.store import Store
 
 FEED_URL = "https://example.com/feed"
@@ -436,6 +437,97 @@ class OpenAppTests(AppTestCase):
         status, body = self.request("GET", "/")
         self.assertEqual(status, 200)
         self.assertIn("Recent digests", body)
+
+    def test_dashboard_renders_history_link(self):
+        _, body = self.request(
+            "POST", "/api/sources", {"name": "Example", "url": FEED_URL, "kind": "rss"}
+        )
+        source_id = json.loads(body)["id"]
+        status, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn("/api/sources/%d/entries" % source_id, body)
+        self.assertIn('>History</a>', body)
+
+    def test_source_entries_newest_first(self):
+        _, body = self.request(
+            "POST", "/api/sources", {"name": "Example", "url": FEED_URL, "kind": "rss"}
+        )
+        source_id = json.loads(body)["id"]
+        for title in ("first", "second", "third"):
+            self.store.save_entry(
+                Entry(source_id=source_id, title=title, body="", fingerprint=title)
+            )
+        status, body = self.request("GET", "/api/sources/%d/entries" % source_id)
+        self.assertEqual(status, 200)
+        entries = json.loads(body)["entries"]
+        self.assertEqual([e["title"] for e in entries], ["third", "second", "first"])
+
+    def test_source_entries_limit(self):
+        _, body = self.request(
+            "POST", "/api/sources", {"name": "Example", "url": FEED_URL, "kind": "rss"}
+        )
+        source_id = json.loads(body)["id"]
+        for title in ("first", "second", "third"):
+            self.store.save_entry(
+                Entry(source_id=source_id, title=title, body="", fingerprint=title)
+            )
+        status, body = self.request(
+            "GET", "/api/sources/%d/entries?limit=1" % source_id
+        )
+        self.assertEqual(status, 200)
+        entries = json.loads(body)["entries"]
+        self.assertEqual([e["title"] for e in entries], ["third"])
+
+    def test_source_entries_scoped_to_source(self):
+        _, body = self.request(
+            "POST", "/api/sources", {"name": "One", "url": FEED_URL, "kind": "rss"}
+        )
+        first_id = json.loads(body)["id"]
+        _, body = self.request(
+            "POST", "/api/sources", {"name": "Two", "url": FEED_URL + "-2", "kind": "rss"}
+        )
+        second_id = json.loads(body)["id"]
+        self.store.save_entry(
+            Entry(source_id=first_id, title="a", body="", fingerprint="a")
+        )
+        self.store.save_entry(
+            Entry(source_id=second_id, title="b", body="", fingerprint="b")
+        )
+        status, body = self.request("GET", "/api/sources/%d/entries" % first_id)
+        self.assertEqual(status, 200)
+        self.assertEqual([e["title"] for e in json.loads(body)["entries"]], ["a"])
+
+    def test_source_entries_unknown_source(self):
+        status, body = self.request("GET", "/api/sources/999999/entries")
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body)["error"], "source not found")
+
+    def test_source_entries_invalid_id(self):
+        status, body = self.request("GET", "/api/sources/abc/entries")
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)["error"], "invalid id")
+
+    def test_source_entries_invalid_limit(self):
+        _, body = self.request(
+            "POST", "/api/sources", {"name": "Example", "url": FEED_URL, "kind": "rss"}
+        )
+        source_id = json.loads(body)["id"]
+        status, body = self.request(
+            "GET", "/api/sources/%d/entries?limit=nope" % source_id
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)["error"], "invalid limit")
+
+    def test_source_entries_does_not_shadow_source_routes(self):
+        _, body = self.request(
+            "POST", "/api/sources", {"name": "Example", "url": FEED_URL, "kind": "rss"}
+        )
+        source_id = json.loads(body)["id"]
+        status, body = self.request("GET", "/api/sources/%d" % source_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["id"], source_id)
+        status, _ = self.request("DELETE", "/api/sources/%d" % source_id)
+        self.assertEqual(status, 200)
 
 
 class SecuredAppTests(AppTestCase):

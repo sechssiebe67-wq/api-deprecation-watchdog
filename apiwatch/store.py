@@ -228,6 +228,23 @@ class Store:
             rows = self._conn.execute(query, params).fetchall()
         return [_row_to_entry(row) for row in rows]
 
+    def list_entries_for_source(self, source_id: int, limit: int = 100) -> List[Entry]:
+        """Return one source's entries, newest first by ``created_at``.
+
+        Ties on ``created_at`` (which has second resolution) are broken by ``id``
+        descending, so the order is deterministic. An unknown source id simply
+        yields an empty list; the HTTP layer decides whether that is a ``404``.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM entries
+                   WHERE source_id = ?
+                   ORDER BY created_at DESC, id DESC
+                   LIMIT ?""",
+                (source_id, limit),
+            ).fetchall()
+        return [_row_to_entry(row) for row in rows]
+
     # -- alerts ------------------------------------------------------------ #
     def create_alert(self, alert: Alert) -> Optional[Alert]:
         with self._lock:

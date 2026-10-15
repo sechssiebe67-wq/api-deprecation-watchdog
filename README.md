@@ -104,6 +104,7 @@ All configuration is environment based:
 | GET    | `/api/sources`     | List monitored sources                    |
 | POST   | `/api/sources`     | Register a source (token protected)       |
 | GET    | `/api/sources/:id` | Fetch one source                          |
+| GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
 | DELETE | `/api/sources/:id` | Remove a source (token protected)         |
 | GET    | `/api/alerts`      | List alerts (`?limit=`, `?severity=`)     |
 | GET    | `/api/entries`     | List parsed entries (`?source_id=`)       |
@@ -190,6 +191,19 @@ behaviour). An empty list is treated as `all`. The same routing applies to
 digest delivery: each notifier receives a digest containing only the alerts
 routed to it. Set `NOTIFY_CHANNELS` to change the default for sources that omit
 the field. Unknown channel names are rejected with `400`.
+
+`GET /api/sources/:id/entries` returns the entries recorded for one source,
+newest first (ordered by `created_at` then `id`, both descending) and capped by
+the optional `?limit=` query parameter (default `100`). An unknown `:id` returns
+`404 {"error": "source not found"}`, while a non-integer `:id` or `?limit=`
+returns `400 {"error": "invalid id"}` or `{"error": "invalid limit"}`
+respectively. The route matches the `/entries` suffix, so `GET` and
+`DELETE /api/sources/:id` are unchanged.
+
+```sh
+# The stored history for source 1, newest first, at most 20 entries.
+curl "http://localhost:8080/api/sources/1/entries?limit=20"
+```
 
 ```sh
 # HTML changelog, narrowed to deprecation headings.

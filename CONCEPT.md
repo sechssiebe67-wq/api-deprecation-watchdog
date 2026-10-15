@@ -100,6 +100,12 @@ heterogeneous noise into a single prioritized alert stream.
   content-hash de-duplication are unaffected.
 - **Persistence:** SQLite store with de-duplication by content hash, so the same
   announcement is only alerted once.
+- **Per-source history API:** each source's recorded entries are browsable
+  newest-first through `GET /api/sources/:id/entries` (optional `?limit=`,
+  default `100`), so the stored history of one dependency can be inspected
+  without filtering the global `/api/entries` feed. An unknown id returns `404`
+  and a non-integer id or limit returns `400`; the `/entries` suffix leaves
+  `GET` and `DELETE /api/sources/:id` unchanged.
 - **Notifications:** Slack incoming webhook, SMTP e-mail and a console channel;
   channels are optional and enabled through configuration.
 - **Per-source notification routing:** every source carries a `notify_channels`
@@ -144,6 +150,7 @@ heterogeneous noise into a single prioritized alert stream.
 | GET    | `/`               | HTML dashboard                            |
 | GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`) |
 | POST   | `/api/sources`    | Register a source, incl. optional `min_severity` and `notify_channels` (token protected) |
+| GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
 | GET    | `/api/alerts`     | List alerts, newest first                 |
 | GET    | `/api/entries`    | List parsed changelog entries             |
@@ -278,6 +285,10 @@ derived from the kind of change rather than from prose.
 notifier channels, so the *Integrations* / delivery-target and *Smarter
 relevance* items below are now partially shipped: the existing channels are
 usable per dependency without adding a new external integration.
+
+*Shipped:* **per-source history API** (see *Current capabilities*) —
+`GET /api/sources/:id/entries` exposes one dependency's stored entry history
+newest-first, a first step toward richer per-dependency history views.
 
 1. **More source adapters:** additional structured feeds beyond the shipped
    GitHub and GitLab releases and OpenAPI adapters. *Partially shipped:*
