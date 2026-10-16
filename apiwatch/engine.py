@@ -170,7 +170,14 @@ class Engine:
                 cap,
             )
 
-        parsed = parsers.parse(source.kind, body, base_url=source.url, selector=source.selector)
+        parsed = parsers.parse(
+            source.kind,
+            body,
+            base_url=source.url,
+            selector=source.selector,
+            baseline=source.openapi_baseline,
+            ignore_paths=source.openapi_ignore_paths,
+        )
         result.sources_checked = 1
         result.entries_seen = len(parsed)
         malformed = (

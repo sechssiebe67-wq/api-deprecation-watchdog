@@ -71,7 +71,16 @@ heterogeneous noise into a single prioritized alert stream.
   structural change instead of relying on prose. For a single spec the document
   is diffed against the empty spec, so first-time registration surfaces the
   whole surface as `info` entries — the baseline is visible without alerting.
-  The severity is derived from the kind of change:
+  An operator can replace that empty spec with a pinned `openapi_baseline` (a
+  JSON spec object, default `null`) so a freshly registered source diffs the
+  live document against the pinned spec and the first scan emits only the
+  structural changes relative to it rather than the whole surface. A second
+  optional field, `openapi_ignore_paths` (a list of dotted path or path-prefix
+  strings, default `[]`), drops structural changes whose affected path matches
+  an entry — exact match or prefix on a `/` boundary, so `paths./v2/legacy` also
+  covers `paths./v2/legacy/sub` but not `paths./v2/legacyv2`. Both controls are
+  inert when unset, so a source with neither field set behaves exactly as
+  before. The severity is derived from the kind of change:
   - `critical` — removed path, removed operation, removed required parameter,
     removed enum value, changed parameter location, changed response status code
     set;
@@ -302,6 +311,9 @@ heterogeneous noise into a single prioritized alert stream.
   `alerts_suppressed` (integer, default `0`), `headers` (JSON
   text), `auth` (text),
   `extra_keywords` and `suppress_keywords` (JSON text),
+  `openapi_baseline` (JSON text or `NULL`, where `NULL` means "diff against the
+  empty spec") and `openapi_ignore_paths` (JSON text, read back as `[]` when
+  unset),
   `failure_count` (integer, default `0`), `breaker_until` (text) and
   `truncated` (integer, default `0`), and a
   lightweight migration adds each column to databases created before it existed,
@@ -403,9 +415,9 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
-| GET    | `/api/sources/:id`| Fetch one source (incl. `notify_min_severity`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `scan_jitter_seconds`, `retention_days`, `max_entries` and breaker fields) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `openapi_baseline`, `openapi_ignore_paths`, `failure_count`, `breaker_until`, `truncated`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `openapi_baseline` and `openapi_ignore_paths` (token protected) |
+| GET    | `/api/sources/:id`| Fetch one source (incl. `notify_min_severity`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `scan_jitter_seconds`, `retention_days`, `max_entries`, `openapi_baseline`, `openapi_ignore_paths` and breaker fields) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`, `?offset=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's `failure_count` and `breaker_until` (token protected) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
@@ -453,6 +465,58 @@ The optional `?limit=` query parameter caps `entries`, `alerts` and `digests`
 `400 {"error": "invalid limit"}`. `sources` are always returned in full, so the
 snapshot never hides which dependencies are configured. The dashboard header has
 a `Download JSON` link for one-click access.
+
+## OpenAPI baseline and ignore paths
+
+A freshly registered `openapi` source normally diffs the live document against
+the empty spec, so every path, operation and parameter shows up as an `info`
+entry (and, at the default `min_severity`, an `info` alert). That whole-surface
+baseline is useful once, but it is noise on every subsequent scan of a
+well-established API. Two optional per-source fields turn that first scan into a
+small, meaningful diff without lowering `min_severity`:
+
+- **`openapi_baseline`** — a JSON object (a pinned OpenAPI/Swagger spec),
+  default `null`. When set, the parser diffs the live document against this
+  baseline instead of the empty spec, so only the structural changes relative to
+  the pinned spec are emitted. It is applied to the single-spec (selector-less)
+  case; a source that pins a baseline *and* points at a list of versions diffs
+  the baseline against the first version and then the versions pairwise. The
+  value must be a JSON object or `null`; a list, string, number or boolean is
+  rejected on registration with
+  `400 {"error": "'openapi_baseline' must be a JSON object or null"}`.
+- **`openapi_ignore_paths`** — a list of dotted path or path-prefix strings,
+  default `[]`. A structural change whose affected path matches an entry is
+  dropped before the entry is emitted, so known-irrelevant surface (for example
+  `paths./internal/health` or `paths./v2/legacy`) stays quiet without muting the
+  rest of the spec. The affected path is written `paths.<path>`, so a change on
+  `/v2/legacy` becomes `paths./v2/legacy`; matching is by exact equality or by
+  prefix on a `/` boundary, so `paths./v2/legacy` also covers
+  `paths./v2/legacy/sub` but not `paths./v2/legacyv2`. Entries are trimmed,
+  de-duplicated and kept case-sensitive (OpenAPI paths are case-sensitive);
+  a non-list value or a blank entry is rejected with
+  `400 {"error": "'openapi_ignore_paths' must be a list of strings"}`.
+
+Both fields default to "off" (`null` / `[]`), and a source with neither set is
+byte-for-byte identical to the pre-feature behaviour: the same entries,
+severities and content hashes as before. They are stored on the `sources` table,
+returned by `GET /api/sources` and `GET /api/sources/:id`, and shown as a compact
+`baseline` / `ignore N` indicator in the dashboard's `OpenAPI` column (the
+pinned payload itself is never rendered).
+
+```sh
+# Pin the current production spec as the diff baseline for a new source and
+# mute the internal health/legacy prefixes so only real public changes alert.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Public API","url":"https://api.acme.com/openapi.json",
+       "kind":"openapi","api_name":"Acme","tracked_versions":["v2"],
+       "openapi_baseline":{"openapi":"3.0.0","info":{"version":"2.0.0"},
+                           "paths":{"/users":{"get":{}}}},
+       "openapi_ignore_paths":["paths./internal/health","paths./v2/legacy"]}'
+
+# The first scan now reports only what changed since 2.0.0, minus the ignored
+# prefixes; everything else is silent, so `min_severity` can stay at `info`.
+```
 
 ## Selector syntax
 
@@ -1162,6 +1226,15 @@ whose dependencies are hosted on GitLab get the same release-body signal.
 `openapi` source kind that diffs two spec versions (or one spec against the
 empty spec) and emits one entry per structural change, with the severity
 derived from the kind of change rather than from prose.
+
+*Shipped:* **per-source OpenAPI baseline and ignore paths** (see *Current
+capabilities* and *OpenAPI baseline and ignore paths*) — an optional
+`openapi_baseline` object pins the spec a live document is diffed against, so a
+first scan reports only the changes since that spec, and `openapi_ignore_paths`
+mutes known-irrelevant structural changes by exact path or `/`-boundary prefix
+without lowering `min_severity`. Both default to off, so a source that sets
+neither behaves exactly as before, and the dashboard shows a compact
+`baseline` / `ignore N` indicator rather than the pinned payload.
 
 *Shipped:* **per-source notification routing** (see *Current capabilities*) — a
 `notify_channels` list on each source that targets a subset of the configured

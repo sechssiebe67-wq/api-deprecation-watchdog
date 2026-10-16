@@ -128,6 +128,22 @@ def render_dashboard(
         """
         return "override" if source.notify_webhook_url else "\u2013"
 
+    def _openapi_indicator(source: Source) -> str:
+        """A compact ``baseline`` / ``ignore N`` marker for an OpenAPI source.
+
+        The pinned baseline payload can be large and is never rendered: a source
+        with a baseline shows ``baseline`` and a source with ignore paths shows
+        the count ``ignore N``. A source that sets neither shows an en-dash.
+        """
+        parts = []
+        if source.openapi_baseline is not None:
+            parts.append("baseline")
+        if source.openapi_ignore_paths:
+            parts.append("ignore %d" % len(source.openapi_ignore_paths))
+        if not parts:
+            return "\u2013"
+        return " \u00b7 ".join(parts)
+
     def _keyword_indicator(source: Source) -> str:
         """A compact ``+extra / -suppressed`` count for the source's keywords."""
         extras = len(source.extra_keywords or [])
@@ -199,8 +215,8 @@ def render_dashboard(
             "<tr><td>%s</td><td><code>%s</code></td><td class=\"col-hide\">%s</td>"
             "<td class=\"col-hide\">%s</td><td>%s</td><td>%s</td><td>%s</td>"
             "<td class=\"col-hide muted\">%s</td><td class=\"col-hide\">%s</td>"
-            "<td class=\"col-hide muted\">%s</td><td class=\"col-hide muted\">%s</td>"
-            "<td>%s</td><td>%s</td>"
+            "<td class=\"col-hide muted\">%s</td><td class=\"col-hide\">%s</td>"
+            "<td class=\"col-hide\">%s</td><td>%s</td><td>%s</td>"
             "<td><a href=\"/api/sources/%s/entries\">History</a></td></tr>"
             % (
                 _esc(source.name),
@@ -214,6 +230,7 @@ def render_dashboard(
                 _esc(_webhook_indicator(source)),
                 _esc(_auth_indicator(source)),
                 _esc(_keyword_indicator(source)),
+                _esc(_openapi_indicator(source)),
                 (
                     _esc(_retention_label(source))
                     + '<span class="muted"> \u00b7 '
@@ -227,7 +244,7 @@ def render_dashboard(
             for source in sources
         )
     else:
-        source_rows = '<tr><td colspan="14" class="muted">No sources registered yet.</td></tr>'
+        source_rows = '<tr><td colspan="15" class="muted">No sources registered yet.</td></tr>'
 
     if alerts:
         alert_rows = ""
@@ -305,7 +322,7 @@ def render_dashboard(
   </table>
   <h2>Monitored sources</h2>
   <table>
-    <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Interval</th><th>Min severity</th><th>Channels</th><th class="col-hide">Webhook</th><th class="col-hide">Auth</th><th class="col-hide">Keywords</th><th class="col-hide">Retention / cap</th><th>Health</th><th>Status</th><th>History</th></tr></thead>
+    <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Interval</th><th>Min severity</th><th>Channels</th><th class="col-hide">Webhook</th><th class="col-hide">Auth</th><th class="col-hide">Keywords</th><th class="col-hide">OpenAPI</th><th class="col-hide">Retention / cap</th><th>Health</th><th>Status</th><th>History</th></tr></thead>
     <tbody>%s</tbody>
   </table>
   <p class="muted">JSON API: <code>/api/sources</code>, <code>/api/sources/:id/entries</code>, <code>/api/sources/:id/reset</code> (POST), <code>/api/alerts</code>, <code>/api/entries</code>, <code>/api/digests</code>, <code>/api/stats</code>, <code>/api/export</code>, <code>/api/check</code> (POST), <code>/api/prune</code> (POST), <code>/api/digest/flush</code> (POST).</p>
