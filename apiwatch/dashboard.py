@@ -91,6 +91,11 @@ def render_dashboard(
         if source.alert_cooldown_seconds:
             # A compact, secret-free indicator that repeats are being coalesced.
             label += " \u00b7 cooldown %ss" % source.alert_cooldown_seconds
+        if source.dedupe_window_seconds:
+            # Time-since-last-dispatch of the same normalized title.
+            label += " \u00b7 dedupe %ss" % source.dedupe_window_seconds
+        else:
+            label += " \u00b7 dedupe \u2013"
         return label
 
     def _auth_indicator(source: Source) -> str:

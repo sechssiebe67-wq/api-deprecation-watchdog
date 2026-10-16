@@ -11,7 +11,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from .models import Alert, Digest, Entry, Source
+from .models import Alert, Digest, Entry, Source, normalize_alert_title
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS sources (
     max_bytes INTEGER,
     retention_days INTEGER,
     alert_cooldown_seconds INTEGER,
+    dedupe_window_seconds INTEGER,
+    last_title_alerts TEXT,
     headers TEXT,
     auth TEXT,
     extra_keywords TEXT NOT NULL DEFAULT '[]',
@@ -191,6 +193,17 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE sources ADD COLUMN alert_cooldown_seconds INTEGER"
             )
+        if "dedupe_window_seconds" not in source_columns:
+            # Old rows keep ``NULL`` (read back as no dedupe window, the default).
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN dedupe_window_seconds INTEGER"
+            )
+        if "last_title_alerts" not in source_columns:
+            # Old rows keep ``NULL`` which is read back as ``{}`` (no title has
+            # been dispatched yet, so nothing is held back).
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN last_title_alerts TEXT"
+            )
         if "last_alert_at" not in source_columns:
             # Old rows keep ``NULL`` so the first alert is never suppressed.
             self._conn.execute(
@@ -236,10 +249,11 @@ class Store:
                     min_severity, notify_min_severity, notify_channels,
                     notify_webhook_url, scan_interval_seconds,
                     scan_jitter_seconds, max_bytes, retention_days,
-                    alert_cooldown_seconds, headers, auth, extra_keywords,
+                    alert_cooldown_seconds, dedupe_window_seconds, headers, auth,
+                    extra_keywords,
                     suppress_keywords, failure_count, breaker_until, truncated,
                     last_alert_at, alerts_suppressed, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -257,6 +271,7 @@ class Store:
                     source.max_bytes,
                     source.retention_days,
                     source.alert_cooldown_seconds,
+                    source.dedupe_window_seconds,
                     json.dumps(source.headers or {}),
                     source.auth,
                     json.dumps(source.extra_keywords or []),
@@ -339,6 +354,51 @@ class Store:
                 (when, source_id),
             )
             self._conn.commit()
+
+    def record_title_dispatch(
+        self, source_id: int, title: str, when: Optional[str]
+    ) -> None:
+        """Remember when a normalized alert title was last fanned out.
+
+        ``last_title_alerts`` is a JSON map of normalized title -> ISO-8601
+        dispatch time that anchors the per-source dedupe window. Persisting it
+        lets the window survive a process restart. ``when=None`` clears the
+        entry; the title is normalized with
+        :func:`apiwatch.models.normalize_alert_title` so callers may pass a raw
+        title.
+        """
+        key = normalize_alert_title(title)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT last_title_alerts FROM sources WHERE id = ?", (source_id,)
+            ).fetchone()
+            if row is None:
+                return
+            times = _parse_title_alerts(row["last_title_alerts"])
+            if when is None:
+                times.pop(key, None)
+            else:
+                times[key] = when
+            self._conn.execute(
+                "UPDATE sources SET last_title_alerts = ? WHERE id = ?",
+                (json.dumps(times), source_id),
+            )
+            self._conn.commit()
+
+    def title_dispatch_times(self, source_id: int) -> dict:
+        """Return the source's normalized-title -> ISO-8601 dispatch-time map.
+
+        Databases created before the column existed and sources that never
+        dispatched a title read back as an empty ``{}``; a malformed value is
+        treated the same way rather than raising.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT last_title_alerts FROM sources WHERE id = ?", (source_id,)
+            ).fetchone()
+        if row is None:
+            return {}
+        return _parse_title_alerts(row["last_title_alerts"])
 
     def record_suppressed_alerts(self, counts: dict) -> None:
         """Increment each source's cumulative suppressed-alert counter.
@@ -705,6 +765,21 @@ class Store:
 # --------------------------------------------------------------------------- #
 # Row mappers
 # --------------------------------------------------------------------------- #
+def _parse_title_alerts(raw) -> dict:
+    """Decode the ``last_title_alerts`` JSON column into a dict.
+
+    ``NULL``, malformed JSON and JSON values that are not objects all read back
+    as an empty dict, so a legacy row can never crash a dispatch.
+    """
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def _row_to_source(row: sqlite3.Row) -> Source:
     return Source(
         id=row["id"],
@@ -724,6 +799,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         max_bytes=row["max_bytes"],
         retention_days=row["retention_days"],
         alert_cooldown_seconds=row["alert_cooldown_seconds"],
+        dedupe_window_seconds=row["dedupe_window_seconds"],
         headers=json.loads(row["headers"] or "{}"),
         auth=row["auth"],
         extra_keywords=json.loads(row["extra_keywords"] or "[]"),

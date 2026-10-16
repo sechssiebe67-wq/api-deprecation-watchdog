@@ -155,6 +155,25 @@ heterogeneous noise into a single prioritized alert stream.
   re-announces the same deprecation, or emits many near-identical entries in a
   short window, therefore no longer floods Slack, e-mail or the webhook channel
   with duplicates.
+- **Per-source title dedupe window:** every source optionally carries a
+  `dedupe_window_seconds` (a non-negative integer, default `None` / `0`, which
+  means disabled and is byte-for-byte equivalent to the pre-feature behaviour).
+  Where `alert_cooldown_seconds` measures the time since the last dispatch *of
+  any alert* from the source, the dedupe window measures the time since the last
+  dispatch *of the same normalized title*, so a vendor that re-posts the same
+  deprecation announcement with a slightly changed body or a new `published`
+  date no longer produces a second Slack/e-mail/webhook message. Titles are
+  normalized (trimmed, internal whitespace collapsed, case-folded) before the
+  comparison, so `"v1 deprecated"` and `"V1   Deprecated"` share one window. The
+  window is *notification-only*: entries and alerts are still stored, keep
+  `notified = 0`, remain visible through `/api/entries`, `/api/alerts` and
+  `/api/export`, and stay eligible for a later digest once the window elapses.
+  The last dispatch time per normalized title is persisted on the source row
+  (`last_title_alerts`) so a restart does not reset the window, and the number
+  of alerts held back is counted as `alerts_suppressed` (the same field the
+  cooldown uses) and aggregated into `GET /api/stats`. The dashboard shows a
+  compact `dedupe Ns` indicator next to the `cooldown Ns` indicator, or `–` when
+  the source has no dedupe window.
 - **Per-source scan intervals:** every source optionally carries a
   `scan_interval_seconds` (a positive integer, default `None`). When set, the
   background scheduler polls that source on its own cadence; when omitted the
@@ -227,7 +246,10 @@ heterogeneous noise into a single prioritized alert stream.
   `NULL`/`0` means no jitter), `max_bytes` (integer or `NULL`),
   `retention_days` (integer or `NULL`), `alert_cooldown_seconds` (integer or
   `NULL`), `last_alert_at` (text, the last dispatch time that anchors the
-  cooldown) and `alerts_suppressed` (integer, default `0`), `headers` (JSON
+  cooldown), `dedupe_window_seconds` (integer or `NULL`), `last_title_alerts`
+  (JSON text, the map of normalized title -> ISO-8601 last dispatch time that
+  anchors the per-title dedupe window, read back as `{}` when unset) and
+  `alerts_suppressed` (integer, default `0`), `headers` (JSON
   text), `auth` (text),
   `extra_keywords` and `suppress_keywords` (JSON text),
   `failure_count` (integer, default `0`), `breaker_until` (text) and
@@ -317,9 +339,9 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `alert_cooldown_seconds`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `alert_cooldown_seconds`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
-| GET    | `/api/sources/:id`| Fetch one source (incl. `notify_min_severity`, `alert_cooldown_seconds`, `scan_jitter_seconds` and breaker fields) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
+| GET    | `/api/sources/:id`| Fetch one source (incl. `notify_min_severity`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `scan_jitter_seconds` and breaker fields) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`, `?offset=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's `failure_count` and `breaker_until` (token protected) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
@@ -663,6 +685,58 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Noisy changelog","url":"https://noisy.example/changelog.json",
        "kind":"json","api_name":"Noisy","tracked_versions":["v2"],
        "alert_cooldown_seconds":3600}'
+```
+
+## Alert dedupe window
+
+Content-hash de-duplication removes byte-for-byte repeats, and
+`alert_cooldown_seconds` flattens a source's whole alert stream. Neither catches
+a vendor that re-posts the *same* deprecation announcement with a tweaked body
+or a new `published` date: the body differs, so the content hash differs, and if
+the source also emits other distinct alerts the cooldown alone does not stop the
+repeat. The per-source `dedupe_window_seconds` closes that gap by keying the
+window on the alert's normalized title instead of the whole source.
+
+- **Field:** `dedupe_window_seconds` is an optional non-negative integer on a
+  source (default `None` / `0`). `null`, omitted and `0` all mean "disabled" and
+  behave byte-for-byte like the pre-feature engine (same dispatch decisions, same
+  `alerts_suppressed` count, no `last_title_alerts` writes). A boolean, negative,
+  non-integer or non-numeric value is rejected with a `400` naming
+  `dedupe_window_seconds`.
+- **Normalization:** titles are compared after trimming, collapsing internal
+  whitespace runs to one space and case-folding, so `"v1 deprecated"`,
+  `" V1  Deprecated "` and `"v1\nDeprecated"` share one window.
+- **Difference from cooldown:** `alert_cooldown_seconds` is time-since-last-
+  dispatch *of any alert* from the source and silences the whole source for the
+  window; `dedupe_window_seconds` is time-since-last-dispatch *of the same
+  normalized title* and therefore lets a genuinely new title through even inside
+  another title's window. The two compose: an alert must clear the notification
+  floor, the cooldown and the dedupe window to be delivered.
+- **Notification only:** a held-back alert is stored with `notified = 0`, appears
+  in `GET /api/alerts`, `GET /api/entries` and `GET /api/export`, and remains
+  eligible for a later digest flush once the window elapses. Entries are always
+  stored.
+- **Persistence:** each delivered title's dispatch time is written to
+  `sources.last_title_alerts` (a JSON map of normalized title -> ISO-8601 time)
+  so the window survives a process restart; a source that never dispatched reads
+  back as `{}` and nothing is held back.
+- **Accounting:** the held-back alerts are added to the same `alerts_suppressed`
+  counter the cooldown uses, aggregated by `GET /api/stats`. The dashboard shows
+  a compact `dedupe Ns` indicator next to `cooldown Ns` in the `Interval`
+  column, or `–` when the field is unset; no secret values are rendered.
+- **Migration:** databases created before this feature gain
+  `dedupe_window_seconds` and `last_title_alerts` automatically. Existing rows
+  read back with a `null` window and an empty title map, so existing deployments
+  are unchanged.
+
+```sh
+# A statuspage that re-posts the same incident headline every few minutes with a
+# new body: store every entry, alert once, then coalesce repeats for 30 minutes.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Payments status","url":"https://status.payments.example/api/v2/incidents.json",
+       "kind":"statuspage","api_name":"Payments","tracked_versions":["v1"],
+       "dedupe_window_seconds":1800}'
 ```
 
 ## Notification floor

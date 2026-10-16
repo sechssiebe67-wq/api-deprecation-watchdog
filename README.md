@@ -64,6 +64,18 @@ actually use.
   are summarised by the next digest. The last dispatch time is persisted, so the
   window survives a restart, and the held-back count is reported as
   `alerts_suppressed` on the check result and in `GET /api/stats`.
+- **Per-source title dedupe window**: each source can set a
+  `dedupe_window_seconds` (non-negative integer, default none) so a vendor that
+  re-posts the same deprecation announcement with a slightly changed body or a
+  new `published` date does not produce a second notification. Unlike the
+  cooldown, the window is keyed on the alert's normalized title (trimmed,
+  whitespace-collapsed, case-folded), so a genuinely new title is still
+  delivered inside another title's window. Held-back alerts are still stored
+  with `notified = 0`, appear in `/api/alerts`, `/api/entries` and `/api/export`,
+  stay eligible for a later digest, are counted as `alerts_suppressed` in
+  `GET /api/stats`, and the per-title dispatch times are persisted so a restart
+  does not reset the window. The dashboard shows a compact `dedupe Ns`
+  indicator (or `–` when unset).
 - **Per-source keyword overrides**: each source can carry `extra_keywords` and
   `suppress_keywords` lists that extend or mute the relevance vocabulary for
   that dependency alone — for example `["retired", "eol"]` or
@@ -123,7 +135,8 @@ actually use.
   ordered summary on a configurable cadence (`off`, `digest` or `both`).
 - **Web dashboard** with an `Interval` column showing each source's cadence (or
   the global default), its jitter window when set (for example
-  `900s +0-300s`) and its `cooldown Ns` alert-cooldown indicator when set, an
+  `900s +0-300s`), its `cooldown Ns` alert-cooldown indicator when set and its
+  `dedupe Ns` title-dedupe indicator (or `–` when unset), an
   `Auth` column showing a lock/header-count indicator
   (never the secret values), a `Keywords` column showing a compact
   `+extra / -suppressed` count (`–` when both lists are empty), a `Health`
@@ -194,9 +207,9 @@ All configuration is environment based:
 | ------ | ------------------ | ----------------------------------------- |
 | GET    | `/healthz`         | Liveness / readiness probe                |
 | GET    | `/`                | HTML dashboard                            |
-| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `notify_min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `notify_min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
 | POST   | `/api/sources`     | Register a source (token protected)       |
-| GET    | `/api/sources/:id` | Fetch one source (incl. `min_severity`, `notify_min_severity`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources/:id` | Fetch one source (incl. `min_severity`, `notify_min_severity`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`, `?offset=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's breaker state (token protected) |
 | DELETE | `/api/sources/:id` | Remove a source (token protected)         |
@@ -230,6 +243,7 @@ Register a source. The `POST /api/sources` payload accepts:
 | `max_bytes`        | no       | Positive integer cap on the response body bytes read and stored for this source; omitted or `null` uses the global `FETCH_MAX_BYTES` |
 | `retention_days`   | no       | Positive integer retention window in days for this source's entries; omitted or `null` inherits the global `RETENTION_DAYS`. `0`, negative, non-integer and boolean values are rejected with a `400` |
 | `alert_cooldown_seconds` | no | Non-negative integer cooldown window (seconds) that suppresses repeat notifications from this source; omitted, `null` or `0` means no cooldown (the default). Negative, non-integer and boolean values are rejected with a `400` |
+| `dedupe_window_seconds` | no | Non-negative integer window (seconds) that suppresses re-notification of an alert whose normalized title (trimmed, whitespace-collapsed, case-folded) was already dispatched from this source; omitted, `null` or `0` means disabled (the default). Negative, non-integer and boolean values are rejected with a `400` |
 | `headers`          | no       | JSON object of header name to string value sent on every fetch (merged over the defaults; names normalized case-insensitively) |
 | `auth`             | no       | `"user:password"` HTTP Basic credentials; adds `Authorization: Basic <base64>` |
 | `extra_keywords`   | no       | List of terms that extend the relevance vocabulary for this source and raise a matching entry to `critical` (trimmed, lower-cased, default `[]`) |
@@ -339,6 +353,38 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Noisy changelog","url":"https://noisy.example/changelog.json",
        "kind":"json","api_name":"Noisy","tracked_versions":["v2"],
        "alert_cooldown_seconds":3600}'
+```
+
+`dedupe_window_seconds` coalesces re-notifications of the *same alert title*
+from one source. It is a non-negative integer number of seconds; omitting it,
+sending `null` or sending `0` disables it and is byte-for-byte equivalent to the
+pre-feature behaviour. Where the cooldown silences the whole source for its
+window, the dedupe window is keyed on the alert's normalized title — trimmed,
+internal whitespace collapsed and case-folded — so `"v1 deprecated"` and
+`"V1   Deprecated"` share a window while a genuinely new title is still
+delivered inside another title's window. A title is held back when it was
+already dispatched from the same source within the previous
+`dedupe_window_seconds`, which catches a vendor that re-posts the same
+announcement with a slightly changed body or a new `published` date. Like the
+cooldown it suppresses *notification only*: the entry and its alert are still
+stored with `notified = 0`, appear in `GET /api/entries`, `GET /api/alerts` and
+`GET /api/export`, and remain eligible for the next digest flush. The per-title
+dispatch times are persisted in the source's `last_title_alerts` map so a restart
+does not reset the window, and the held-back alerts are counted as
+`alerts_suppressed` on the `POST /api/check` result and in `GET /api/stats`. The
+dashboard shows a compact `dedupe Ns` indicator in the `Interval` column, or `–`
+when unset. A negative, non-integer, boolean or string value is rejected with a
+`400` naming `dedupe_window_seconds`. It composes with the notification floor and
+the cooldown: an alert must clear all three to be delivered.
+
+```sh
+# A statuspage that re-posts the same incident headline with a new body every
+# few minutes: keep every entry, alert once, then coalesce repeats for 30 min.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Payments status","url":"https://status.payments.example/api/v2/incidents.json",
+       "kind":"statuspage","api_name":"Payments","tracked_versions":["v1"],
+       "dedupe_window_seconds":1800}'
 ```
 
 `notify_channels` controls where a source's alerts are delivered. It is a list

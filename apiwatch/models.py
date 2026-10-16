@@ -33,6 +33,18 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def normalize_alert_title(title: str) -> str:
+    """Return a canonical key for alert-title de-duplication.
+
+    Leading/trailing whitespace is trimmed, every run of internal whitespace is
+    collapsed to a single space and the result is case-folded, so titles that
+    differ only in spacing or case share a key.
+    """
+    if title is None:
+        return ""
+    return " ".join(str(title).split()).casefold()
+
+
 def canonical_header_name(name: str) -> str:
     """Return the canonical ``Title-Case`` form of an HTTP header name.
 
@@ -60,6 +72,7 @@ class Source:
     max_bytes: Optional[int] = None
     retention_days: Optional[int] = None
     alert_cooldown_seconds: Optional[int] = None
+    dedupe_window_seconds: Optional[int] = None
     headers: Dict[str, str] = field(default_factory=dict)
     auth: Optional[str] = None
     extra_keywords: List[str] = field(default_factory=list)
@@ -127,6 +140,13 @@ class Source:
             if isinstance(cooldown, bool) or not isinstance(cooldown, int) or cooldown < 0:
                 raise ValueError(
                     "alert_cooldown_seconds must be a non-negative integer"
+                )
+        dedupe = self.dedupe_window_seconds
+        if dedupe is not None:
+            # ``bool`` is an ``int`` subclass but is not a meaningful window.
+            if isinstance(dedupe, bool) or not isinstance(dedupe, int) or dedupe < 0:
+                raise ValueError(
+                    "dedupe_window_seconds must be a non-negative integer"
                 )
         if (
             isinstance(self.alerts_suppressed, bool)
@@ -246,6 +266,7 @@ class Source:
             "max_bytes": self.max_bytes,
             "retention_days": self.retention_days,
             "alert_cooldown_seconds": self.alert_cooldown_seconds,
+            "dedupe_window_seconds": self.dedupe_window_seconds,
             "headers": dict(self.headers),
             "auth": self.auth,
             "extra_keywords": list(self.extra_keywords),
