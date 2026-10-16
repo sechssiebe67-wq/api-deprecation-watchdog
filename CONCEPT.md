@@ -828,10 +828,19 @@ behaviour byte-for-byte unchanged, and is ignored by the manual
 
 *Shipped:* **generic webhook adapter** (see *Current capabilities*) — a
 `webhook` notifier channel that POSTs a dependency-free JSON payload to
-`WEBHOOK_URL`, plus a per-source `notify_webhook_url` override so a critical
-dependency can escalate to a dedicated incident endpoint. This advances the
-*Integrations* item below: alert routing no longer requires a hard-coded
-integration for each tracker or paging system.
+`WEBHOOK_URL`, plus a per-source `notify_webhook_url` override that routes both
+that source's alerts *and* its digests to a dedicated endpoint; omitting the
+field falls back to the global `WEBHOOK_URL`. This advances the *Integrations*
+item below: alert routing no longer requires a hard-coded integration for each
+tracker or paging system.
+
+**Remaining webhook work (not yet shipped):** the per-source override selects the
+right endpoint, but delivery hardening is still open. Two follow-ups are
+explicit next steps rather than shipped behaviour: **per-source retry/backoff**
+(a failed POST is currently logged and left pending for the next scan or digest
+flush, with no bounded retry window or exponential backoff), and an optional
+**signature header** so a receiving endpoint can verify that a payload was sent
+by the watchdog and has not been tampered with.
 
 *Shipped:* **per-source request headers and basic auth** (see *Current
 capabilities*) — an optional `headers` map and an `auth` (`"user:password"`)

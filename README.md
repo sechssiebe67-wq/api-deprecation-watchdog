@@ -167,7 +167,7 @@ All configuration is environment based:
 | `NOTIFY_CHANNELS`        | `all`   | Default routing for sources that omit `notify_channels`; comma-separated `console`, `slack`, `email` or `all` |
 | `API_TOKEN`              | –       | Bearer token required for mutating endpoints        |
 | `SLACK_WEBHOOK_URL`      | –       | Slack incoming webhook for alert delivery           |
-| `WEBHOOK_URL`            | –       | Generic JSON webhook for the `webhook` channel; per-source `notify_webhook_url` overrides it |
+| `WEBHOOK_URL`            | –       | Generic JSON webhook for the `webhook` channel and its digests; per-source `notify_webhook_url` overrides it per source (omitted sources keep this global URL) |
 | `SMTP_HOST` / `SMTP_PORT`| – / `587` | SMTP server for e-mail alerts                     |
 | `SMTP_USER` / `SMTP_PASSWORD` | –  | SMTP credentials                                    |
 | `SMTP_FROM` / `SMTP_TO`  | –       | Sender and comma-separated recipients               |
@@ -214,7 +214,7 @@ Register a source. The `POST /api/sources` payload accepts:
 | `enabled`          | no       | Whether the scheduler polls it (default `true`)               |
 | `min_severity`     | no       | Lowest severity that creates an alert: `critical`, `warning` or `info` (default `info`) |
 | `notify_channels`  | no       | Channels that receive this source's alerts: a list of `console`, `slack`, `email`, `webhook` or `all` (default `all`) |
-| `notify_webhook_url` | no     | `http(s)` URL that overrides `WEBHOOK_URL` for this source's alerts and digests |
+| `notify_webhook_url` | no     | `http(s)` URL that overrides `WEBHOOK_URL` for this source's alerts and digests; omitted or `null` falls back to the global `WEBHOOK_URL` |
 | `scan_interval_seconds` | no  | Positive integer override for this source's polling cadence; omitted keeps the global `POLL_INTERVAL_SECONDS` |
 | `scan_jitter_seconds` | no     | Non-negative integer window (seconds) added as a deterministic, id-derived offset to this source's due time so its polls are spread; omitted, `null` or `0` means no jitter |
 | `max_bytes`        | no       | Positive integer cap on the response body bytes read and stored for this source; omitted or `null` uses the global `FETCH_MAX_BYTES` |

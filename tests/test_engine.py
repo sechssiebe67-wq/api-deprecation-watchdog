@@ -430,6 +430,20 @@ class FailingWebhook(WebhookNotifier):
         raise NotificationError("webhook returned 500")
 
 
+class SelectiveWebhook(WebhookNotifier):
+    """Fails for one URL only, so a digest flush can be partly successful."""
+
+    def __init__(self, fail_url, global_url="https://global.test/hook"):
+        super().__init__(global_url)
+        self.fail_url = fail_url
+        self.calls = []
+
+    def _post(self, url, payload):
+        self.calls.append((url, payload))
+        if url == self.fail_url:
+            raise NotificationError("webhook returned 500")
+
+
 class NamedNotifier(Notifier):
     def __init__(self, name):
         self.name = name
@@ -448,14 +462,14 @@ class WebhookEngineTests(unittest.TestCase):
     def tearDown(self):
         self.store.close()
 
-    def _source(self, name, url, webhook_url=None):
+    def _source(self, name, url, webhook_url=None, channels=None):
         return self.store.add_source(
             Source(
                 name=name,
                 url=url,
                 kind="rss",
                 tracked_versions=["v1"],
-                notify_channels=["webhook"],
+                notify_channels=channels or ["webhook"],
                 notify_webhook_url=webhook_url,
             )
         )
@@ -522,6 +536,98 @@ class WebhookEngineTests(unittest.TestCase):
         self.assertEqual(url, "https://example.test/critical")
         self.assertIn("digest", payload)
         self.assertEqual(len(self.store.list_alerts(notified=False)), 0)
+
+    def test_override_source_delivers_only_to_override(self):
+        source = self._source(
+            "Critical", self.url_a, webhook_url="https://example.test/critical"
+        )
+        webhook = RecordingWebhook()
+        engine = Engine(
+            self.store, FakeFetcher({self.url_a: RSS}), notifiers=[webhook]
+        )
+        engine.scan_source(source)
+        self.assertEqual(
+            [url for url, _ in webhook.calls], ["https://example.test/critical"]
+        )
+        self.assertEqual(len(self.store.list_alerts(notified=False)), 0)
+
+    def test_source_without_override_delivers_to_global(self):
+        source = self._source("Normal", self.url_a)
+        webhook = RecordingWebhook()
+        engine = Engine(
+            self.store, FakeFetcher({self.url_a: RSS}), notifiers=[webhook]
+        )
+        engine.scan_source(source)
+        self.assertEqual(
+            [url for url, _ in webhook.calls], ["https://global.test/hook"]
+        )
+        self.assertEqual(len(self.store.list_alerts(notified=False)), 0)
+
+    def test_digest_groups_alerts_by_effective_url(self):
+        critical = self._source(
+            "Critical", self.url_a, webhook_url="https://example.test/critical"
+        )
+        normal = self._source("Normal", self.url_b)
+        webhook = RecordingWebhook()
+        engine = Engine(
+            self.store,
+            FakeFetcher({self.url_a: RSS, self.url_b: RSS}),
+            notifiers=[webhook],
+            digest_mode="digest",
+        )
+        engine.scan_source(critical)
+        engine.scan_source(normal)
+        self.assertEqual(webhook.calls, [])
+        digest = engine.flush_digest()
+        self.assertIsNotNone(digest)
+        self.assertEqual(
+            sorted(url for url, _ in webhook.calls),
+            ["https://example.test/critical", "https://global.test/hook"],
+        )
+        # Every alert was delivered exactly once, so nothing is left pending.
+        self.assertEqual(len(self.store.list_alerts(notified=False)), 0)
+
+    def test_digest_failure_is_isolated_per_url(self):
+        critical = self._source(
+            "Critical", self.url_a, webhook_url="https://example.test/critical"
+        )
+        normal = self._source("Normal", self.url_b)
+        webhook = SelectiveWebhook("https://example.test/critical")
+        engine = Engine(
+            self.store,
+            FakeFetcher({self.url_a: RSS, self.url_b: RSS}),
+            notifiers=[webhook],
+            digest_mode="digest",
+        )
+        engine.scan_source(critical)
+        engine.scan_source(normal)
+        engine.flush_digest()
+        # Both endpoints were attempted; the failing group did not abort the
+        # flush for the healthy URL.
+        self.assertEqual(
+            sorted(url for url, _ in webhook.calls),
+            ["https://example.test/critical", "https://global.test/hook"],
+        )
+        pending = self.store.list_alerts(notified=False)
+        self.assertEqual([alert.source_id for alert in pending], [critical.id])
+
+    def test_console_routing_ignores_webhook_override(self):
+        source = self._source(
+            "Chatty",
+            self.url_a,
+            webhook_url="https://example.test/critical",
+            channels=["console"],
+        )
+        console = NamedNotifier("console")
+        webhook = RecordingWebhook()
+        engine = Engine(
+            self.store,
+            FakeFetcher({self.url_a: RSS}),
+            notifiers=[console, webhook],
+        )
+        engine.scan_source(source)
+        self.assertEqual(webhook.calls, [])
+        self.assertEqual(len(console.batches), 1)
 
 
 if __name__ == "__main__":
