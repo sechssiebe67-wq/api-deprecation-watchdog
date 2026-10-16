@@ -124,6 +124,19 @@ def validate_source_payload(
         raise ApiError(
             400, "'min_severity' must be one of %s" % ", ".join(SEVERITIES)
         )
+    # ``notify_min_severity`` is a notification-only floor: omitted or ``null``
+    # means "inherit min_severity" and is preserved as ``None``.
+    notify_min_severity = payload.get("notify_min_severity")
+    if notify_min_severity is not None:
+        if (
+            not isinstance(notify_min_severity, str)
+            or notify_min_severity.strip().lower() not in SEVERITIES
+        ):
+            raise ApiError(
+                400,
+                "'notify_min_severity' must be one of %s" % ", ".join(SEVERITIES),
+            )
+        notify_min_severity = notify_min_severity.strip().lower()
     channels = payload.get("notify_channels")
     if channels is None:
         channels = list(default_channels) if default_channels else [ALL_CHANNELS]
@@ -234,6 +247,7 @@ def validate_source_payload(
         enabled=bool(payload.get("enabled", True)),
         selector=selector,
         min_severity=min_severity.strip().lower(),
+        notify_min_severity=notify_min_severity,
         notify_channels=normalized_channels,
         notify_webhook_url=notify_webhook_url,
         scan_interval_seconds=scan_interval,

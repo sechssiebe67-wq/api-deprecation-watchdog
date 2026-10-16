@@ -52,6 +52,7 @@ class Source:
     enabled: bool = True
     selector: Optional[str] = None
     min_severity: str = "info"
+    notify_min_severity: Optional[str] = None
     notify_channels: List[str] = field(default_factory=lambda: [ALL_CHANNELS])
     notify_webhook_url: Optional[str] = None
     scan_interval_seconds: Optional[int] = None
@@ -74,6 +75,19 @@ class Source:
     def __post_init__(self) -> None:
         if self.min_severity not in SEVERITIES:
             raise ValueError("min_severity must be one of %s" % ", ".join(SEVERITIES))
+        if self.notify_min_severity is not None:
+            # ``None`` means "inherit min_severity"; anything else must be a
+            # severity, normalized to the canonical lowercase spelling.
+            if not isinstance(self.notify_min_severity, str):
+                raise ValueError(
+                    "notify_min_severity must be one of %s" % ", ".join(SEVERITIES)
+                )
+            normalized_floor = self.notify_min_severity.strip().lower()
+            if normalized_floor not in SEVERITIES:
+                raise ValueError(
+                    "notify_min_severity must be one of %s" % ", ".join(SEVERITIES)
+                )
+            self.notify_min_severity = normalized_floor
         if self.notify_webhook_url is not None:
             if (
                 not isinstance(self.notify_webhook_url, str)
@@ -224,6 +238,7 @@ class Source:
             "enabled": self.enabled,
             "selector": self.selector,
             "min_severity": self.min_severity,
+            "notify_min_severity": self.notify_min_severity,
             "notify_channels": list(self.notify_channels),
             "notify_webhook_url": self.notify_webhook_url,
             "scan_interval_seconds": self.scan_interval_seconds,

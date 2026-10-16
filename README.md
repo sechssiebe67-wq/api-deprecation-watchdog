@@ -45,6 +45,15 @@ actually use.
 - **Per-source severity floor**: each source has a `min_severity` (default
   `info`) that suppresses alerts below the chosen level while still recording
   the entries.
+- **Per-source notification floor**: each source can set a `notify_min_severity`
+  (default: inherit `min_severity`) as a second, notification-only floor.
+  Alerts below it are still stored, appear in `/api/entries`, `/api/alerts` and
+  `/api/export`, and keep `notified = 0`, but they are never fanned out by
+  immediate dispatch and are never claimed by a digest flush. Set
+  `min_severity: "info"` with `notify_min_severity: "critical"` to keep the full
+  history while only notifying on critical changes; held-back alerts are counted
+  as `alerts_suppressed`, and the dashboard shows a compact `notify: <severity>`
+  indicator.
 - **Per-source alert cooldown**: each source can set an
   `alert_cooldown_seconds` (non-negative integer, default none) so a noisy
   dependency whose changelog re-announces the same deprecation, or emits several
@@ -185,9 +194,9 @@ All configuration is environment based:
 | ------ | ------------------ | ----------------------------------------- |
 | GET    | `/healthz`         | Liveness / readiness probe                |
 | GET    | `/`                | HTML dashboard                            |
-| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `notify_min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
 | POST   | `/api/sources`     | Register a source (token protected)       |
-| GET    | `/api/sources/:id` | Fetch one source (incl. `scan_jitter_seconds`, `alert_cooldown_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources/:id` | Fetch one source (incl. `min_severity`, `notify_min_severity`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`, `?offset=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's breaker state (token protected) |
 | DELETE | `/api/sources/:id` | Remove a source (token protected)         |
@@ -213,6 +222,7 @@ Register a source. The `POST /api/sources` payload accepts:
 | `selector`         | no       | Extraction hint; CSS-like for `html`, dotted path for `json`/`github`/`gitlab`/`openapi` |
 | `enabled`          | no       | Whether the scheduler polls it (default `true`)               |
 | `min_severity`     | no       | Lowest severity that creates an alert: `critical`, `warning` or `info` (default `info`) |
+| `notify_min_severity` | no    | Lowest severity that is *notified*: `critical`, `warning` or `info`; omitted or `null` inherits `min_severity`. Alerts below it are stored but never dispatched or digested. Any other value is rejected with a `400` |
 | `notify_channels`  | no       | Channels that receive this source's alerts: a list of `console`, `slack`, `email`, `webhook` or `all` (default `all`) |
 | `notify_webhook_url` | no     | `http(s)` URL that overrides `WEBHOOK_URL` for this source's alerts and digests; omitted or `null` falls back to the global `WEBHOOK_URL` |
 | `scan_interval_seconds` | no  | Positive integer override for this source's polling cadence; omitted keeps the global `POLL_INTERVAL_SECONDS` |
@@ -287,6 +297,22 @@ at or above the floor become alerts. The ladder is `critical` > `warning` >
 `info`, so a source with `min_severity: "warning"` ignores `info`-level release
 notes but still alerts on `warning` and `critical` deprecations. Entries below
 the floor remain in the history (`/api/entries`) and are de-duplicated normally.
+
+`notify_min_severity` adds a second, notification-only floor. It is `critical`,
+`warning` or `info` (case-insensitive, trimmed) and defaults to inheriting
+`min_severity` when omitted or `null`. An alert that clears `min_severity` but
+ranks below the effective notification floor (`notify_min_severity` if set,
+otherwise `min_severity`) is still created and stored, appears in
+`GET /api/alerts`, `GET /api/entries` and `GET /api/export`, and keeps
+`notified = 0`, but is never fanned out by immediate dispatch and is never
+claimed by a digest flush. This lets an operator record `info` and `warning`
+alerts for history while only ever notifying on `critical`. Held-back alerts are
+counted as `alerts_suppressed` (composing with the cooldown: an alert must clear
+both filters to be delivered), the dashboard shows a compact
+`notify: <severity>` indicator next to the `Min severity` badge (or `–` when
+inheriting), and any value outside `critical`/`warning`/`info` is rejected with a
+`400` naming `notify_min_severity`. Omitting the field on every source is
+byte-for-byte equivalent to the pre-feature behaviour.
 
 `alert_cooldown_seconds` coalesces repeat notifications from one noisy source.
 It is a non-negative integer number of seconds; omitting it, sending `null` or
