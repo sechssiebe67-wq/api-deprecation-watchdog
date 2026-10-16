@@ -33,7 +33,9 @@ CREATE TABLE IF NOT EXISTS sources (
     retention_days INTEGER,
     alert_cooldown_seconds INTEGER,
     dedupe_window_seconds INTEGER,
+    escalation_window_seconds INTEGER,
     last_title_alerts TEXT,
+    last_severity_alerts TEXT,
     headers TEXT,
     auth TEXT,
     extra_keywords TEXT NOT NULL DEFAULT '[]',
@@ -204,6 +206,17 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE sources ADD COLUMN last_title_alerts TEXT"
             )
+        if "escalation_window_seconds" not in source_columns:
+            # Old rows keep ``NULL`` (read back as no escalation window).
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN escalation_window_seconds INTEGER"
+            )
+        if "last_severity_alerts" not in source_columns:
+            # Old rows keep ``NULL`` which is read back as ``{}`` (no severity
+            # has been dispatched yet, so nothing is held back).
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN last_severity_alerts TEXT"
+            )
         if "last_alert_at" not in source_columns:
             # Old rows keep ``NULL`` so the first alert is never suppressed.
             self._conn.execute(
@@ -249,11 +262,13 @@ class Store:
                     min_severity, notify_min_severity, notify_channels,
                     notify_webhook_url, scan_interval_seconds,
                     scan_jitter_seconds, max_bytes, retention_days,
-                    alert_cooldown_seconds, dedupe_window_seconds, headers, auth,
+                    alert_cooldown_seconds, dedupe_window_seconds,
+                    escalation_window_seconds, headers, auth,
                     extra_keywords,
                     suppress_keywords, failure_count, breaker_until, truncated,
-                    last_alert_at, alerts_suppressed, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    last_alert_at, last_severity_alerts, alerts_suppressed,
+                    created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -272,6 +287,7 @@ class Store:
                     source.retention_days,
                     source.alert_cooldown_seconds,
                     source.dedupe_window_seconds,
+                    source.escalation_window_seconds,
                     json.dumps(source.headers or {}),
                     source.auth,
                     json.dumps(source.extra_keywords or []),
@@ -280,6 +296,7 @@ class Store:
                     source.breaker_until,
                     1 if source.truncated else 0,
                     source.last_alert_at,
+                    json.dumps(source.last_severity_alerts or {}),
                     source.alerts_suppressed,
                     _now(),
                 ),
@@ -400,12 +417,53 @@ class Store:
             return {}
         return _parse_title_alerts(row["last_title_alerts"])
 
+    def record_severity_alerts(self, source_id: int, mapping: dict) -> None:
+        """Merge per-severity dispatch times into ``last_severity_alerts``.
+
+        ``mapping`` maps a severity (``critical``/``warning``/``info``) to the
+        ISO-8601 time it was last fanned out. Existing entries for other
+        severities are preserved and a repeated severity is overwritten (last
+        write wins), so the map anchors the per-source severity escalation
+        window across a process restart. An empty ``mapping`` is a no-op.
+        """
+        if not mapping:
+            return
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT last_severity_alerts FROM sources WHERE id = ?", (source_id,)
+            ).fetchone()
+            if row is None:
+                return
+            times = _parse_severity_alerts(row["last_severity_alerts"])
+            for severity, when in mapping.items():
+                times[str(severity)] = str(when)
+            self._conn.execute(
+                "UPDATE sources SET last_severity_alerts = ? WHERE id = ?",
+                (json.dumps(times), source_id),
+            )
+            self._conn.commit()
+
+    def severity_dispatch_times(self, source_id: int) -> dict:
+        """Return the source's severity -> ISO-8601 dispatch-time map.
+
+        Databases created before the column existed and sources that never
+        dispatched a severity read back as an empty ``{}``; a malformed value is
+        treated the same way rather than raising.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT last_severity_alerts FROM sources WHERE id = ?", (source_id,)
+            ).fetchone()
+        if row is None:
+            return {}
+        return _parse_severity_alerts(row["last_severity_alerts"])
+
     def record_suppressed_alerts(self, counts: dict) -> None:
         """Increment each source's cumulative suppressed-alert counter.
 
-        ``counts`` maps a source id to the number of alerts the cooldown held
-        back in one dispatch. The counter is surfaced, aggregated, as
-        ``alerts_suppressed`` by :meth:`stats`.
+        ``counts`` maps a source id to the number of alerts the notification
+        filters held back in one dispatch. The counter is surfaced, aggregated,
+        as ``alerts_suppressed`` by :meth:`stats`.
         """
         if not counts:
             return
@@ -780,6 +838,24 @@ def _parse_title_alerts(raw) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _parse_severity_alerts(raw) -> dict:
+    """Decode the ``last_severity_alerts`` JSON column into a dict.
+
+    ``NULL``, malformed JSON and JSON values that are not objects all read back
+    as an empty dict, so a legacy row can never crash a dispatch. Keys and
+    values are coerced to strings so the map is always ``{severity: iso8601}``.
+    """
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {str(severity): str(when) for severity, when in value.items()}
+
+
 def _row_to_source(row: sqlite3.Row) -> Source:
     return Source(
         id=row["id"],
@@ -800,6 +876,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         retention_days=row["retention_days"],
         alert_cooldown_seconds=row["alert_cooldown_seconds"],
         dedupe_window_seconds=row["dedupe_window_seconds"],
+        escalation_window_seconds=row["escalation_window_seconds"],
         headers=json.loads(row["headers"] or "{}"),
         auth=row["auth"],
         extra_keywords=json.loads(row["extra_keywords"] or "[]"),
@@ -809,6 +886,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         breaker_until=row["breaker_until"],
         truncated=bool(row["truncated"]),
         last_alert_at=row["last_alert_at"],
+        last_severity_alerts=_parse_severity_alerts(row["last_severity_alerts"]),
         alerts_suppressed=int(row["alerts_suppressed"] or 0),
     )
 

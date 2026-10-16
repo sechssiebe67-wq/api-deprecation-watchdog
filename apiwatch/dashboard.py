@@ -96,6 +96,11 @@ def render_dashboard(
             label += " \u00b7 dedupe %ss" % source.dedupe_window_seconds
         else:
             label += " \u00b7 dedupe \u2013"
+        if source.escalation_window_seconds:
+            # Time-since-last-dispatch of the same severity.
+            label += " \u00b7 escalate %ss" % source.escalation_window_seconds
+        else:
+            label += " \u00b7 escalate \u2013"
         return label
 
     def _auth_indicator(source: Source) -> str:
@@ -106,6 +111,15 @@ def render_dashboard(
         if source.headers:
             parts.append("%d hdr" % len(source.headers))
         return " ".join(parts)
+
+    def _webhook_indicator(source: Source) -> str:
+        """A compact marker for a per-source webhook override.
+
+        The override URL may embed a secret token, so the dashboard never renders
+        it: a source with an override shows ``override`` and a source without one
+        shows an en-dash.
+        """
+        return "override" if source.notify_webhook_url else "\u2013"
 
     def _keyword_indicator(source: Source) -> str:
         """A compact ``+extra / -suppressed`` count for the source's keywords."""
@@ -180,7 +194,7 @@ def render_dashboard(
                 "%s <span class=\"muted\">%s</span>"
                 % (_badge(source.min_severity), _esc(_notify_floor_label(source))),
                 _esc(", ".join(source.notify_channels)),
-                _esc(_truncate(source.notify_webhook_url) if source.notify_webhook_url else "\u2013"),
+                _esc(_webhook_indicator(source)),
                 _esc(_auth_indicator(source)),
                 _esc(_keyword_indicator(source)),
                 _esc(_retention_label(source)),

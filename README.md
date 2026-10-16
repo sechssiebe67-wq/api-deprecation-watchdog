@@ -76,6 +76,20 @@ actually use.
   `GET /api/stats`, and the per-title dispatch times are persisted so a restart
   does not reset the window. The dashboard shows a compact `dedupe Ns`
   indicator (or `–` when unset).
+- **Per-source severity escalation window**: each source can set an
+  `escalation_window_seconds` (non-negative integer, default none) so a source
+  that re-announces the *same severity* of change every few days (with a
+  drifting title and body, so the content hash and the title window both miss
+  it) pages at most once per window. An alert at or above the source's effective
+  notification floor is only dispatched when no alert of the same severity was
+  dispatched from the same source within the window; a higher-severity alert
+  always escalates through. Held-back alerts are still stored with
+  `notified = 0`, appear in `/api/alerts`, `/api/entries` and `/api/export`,
+  stay eligible for a later digest, and are counted as `alerts_suppressed` in
+  `GET /api/stats`. It composes with `alert_cooldown_seconds`,
+  `dedupe_window_seconds` and `notify_min_severity`, and the per-severity
+  dispatch times are persisted so a restart does not reset the window. The
+  dashboard shows a compact `escalate Ns` indicator (or `–` when unset).
 - **Per-source keyword overrides**: each source can carry `extra_keywords` and
   `suppress_keywords` lists that extend or mute the relevance vocabulary for
   that dependency alone — for example `["retired", "eol"]` or
@@ -135,10 +149,12 @@ actually use.
   ordered summary on a configurable cadence (`off`, `digest` or `both`).
 - **Web dashboard** with an `Interval` column showing each source's cadence (or
   the global default), its jitter window when set (for example
-  `900s +0-300s`), its `cooldown Ns` alert-cooldown indicator when set and its
-  `dedupe Ns` title-dedupe indicator (or `–` when unset), an
+  `900s +0-300s`), its `cooldown Ns` alert-cooldown indicator when set, its
+  `dedupe Ns` title-dedupe indicator and its `escalate Ns` severity-escalation
+  indicator (each `–` when unset), an
   `Auth` column showing a lock/header-count indicator
-  (never the secret values), a `Keywords` column showing a compact
+  (never the secret values), a `Webhook` column showing `override` (never the
+  URL, which may embed a token), a `Keywords` column showing a compact
   `+extra / -suppressed` count (`–` when both lists are empty), a `Health`
   column (`ok`, `N failures`, `truncated` for a clipped last scan, or
   `tripped until <time>` with a `Reset` action), a
@@ -207,9 +223,9 @@ All configuration is environment based:
 | ------ | ------------------ | ----------------------------------------- |
 | GET    | `/healthz`         | Liveness / readiness probe                |
 | GET    | `/`                | HTML dashboard                            |
-| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `notify_min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `notify_min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
 | POST   | `/api/sources`     | Register a source (token protected)       |
-| GET    | `/api/sources/:id` | Fetch one source (incl. `min_severity`, `notify_min_severity`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources/:id` | Fetch one source (incl. `min_severity`, `notify_min_severity`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`, `?offset=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's breaker state (token protected) |
 | DELETE | `/api/sources/:id` | Remove a source (token protected)         |
@@ -244,6 +260,7 @@ Register a source. The `POST /api/sources` payload accepts:
 | `retention_days`   | no       | Positive integer retention window in days for this source's entries; omitted or `null` inherits the global `RETENTION_DAYS`. `0`, negative, non-integer and boolean values are rejected with a `400` |
 | `alert_cooldown_seconds` | no | Non-negative integer cooldown window (seconds) that suppresses repeat notifications from this source; omitted, `null` or `0` means no cooldown (the default). Negative, non-integer and boolean values are rejected with a `400` |
 | `dedupe_window_seconds` | no | Non-negative integer window (seconds) that suppresses re-notification of an alert whose normalized title (trimmed, whitespace-collapsed, case-folded) was already dispatched from this source; omitted, `null` or `0` means disabled (the default). Negative, non-integer and boolean values are rejected with a `400` |
+| `escalation_window_seconds` | no | Non-negative integer window (seconds) that suppresses re-notification of an alert whose severity was already dispatched from this source within the window; a higher-severity alert always escalates through. Omitted, `null` or `0` means disabled (the default). Negative, non-integer and boolean values are rejected with a `400` |
 | `headers`          | no       | JSON object of header name to string value sent on every fetch (merged over the defaults; names normalized case-insensitively) |
 | `auth`             | no       | `"user:password"` HTTP Basic credentials; adds `Authorization: Basic <base64>` |
 | `extra_keywords`   | no       | List of terms that extend the relevance vocabulary for this source and raise a matching entry to `critical` (trimmed, lower-cased, default `[]`) |
@@ -385,6 +402,41 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Payments status","url":"https://status.payments.example/api/v2/incidents.json",
        "kind":"statuspage","api_name":"Payments","tracked_versions":["v1"],
        "dedupe_window_seconds":1800}'
+```
+
+`escalation_window_seconds` coalesces repeated notifications of the *same
+severity* from one source. It is a non-negative integer number of seconds;
+omitting it, sending `null` or sending `0` disables it and is byte-for-byte
+equivalent to the pre-feature behaviour. When set, an alert at or above the
+source's effective notification floor (`notify_min_severity` if set, otherwise
+`min_severity`) is only dispatched if no alert of the same severity from the same
+source was dispatched within the previous `escalation_window_seconds`; a
+higher-severity alert always escalates through, so after a `warning` a `critical`
+is still delivered, but a repeat `critical` inside the window is held back. It
+closes the gap left by the cooldown and the title window: a vendor that
+re-announces the same-severity change every few days with a drifting title and
+body is no longer paged on every re-announcement. Like the other filters it
+suppresses *notification only*: the entry and its alert are still stored with
+`notified = 0`, appear in `GET /api/entries`, `GET /api/alerts` and
+`GET /api/export`, and remain eligible for the next digest flush. The per-severity
+dispatch times are persisted in the source's `last_severity_alerts` map
+(merged last-write-wins) so a restart does not reset the window, and the held-back
+alerts are counted as `alerts_suppressed` on the `POST /api/check` result and in
+`GET /api/stats`. The dashboard shows a compact `escalate Ns` indicator in the
+`Interval` column, or `–` when unset. A negative, non-integer, boolean or string
+value is rejected with a `400` naming `escalation_window_seconds`. It composes
+with the notification floor, the cooldown and the title-dedupe window: an alert
+must clear all four to be delivered.
+
+```sh
+# A source that re-announces a critical change every few days: record every
+# entry, page at most once a day per severity, and always let a higher severity
+# escalate through.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Vendor SDK","url":"https://vendor.example/changelog.json",
+       "kind":"json","api_name":"Vendor","tracked_versions":["v2"],
+       "escalation_window_seconds":86400}'
 ```
 
 `notify_channels` controls where a source's alerts are delivered. It is a list

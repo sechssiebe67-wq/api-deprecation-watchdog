@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, field
 from typing import List
 
+from .models import SEVERITIES, severity_rank
 from .parsers import ParsedEntry
 
 # Terms are grouped by severity. Matching is case-insensitive on word
@@ -47,9 +48,6 @@ INFO_TERMS = (
     "new version",
     "release",
 )
-
-_SEVERITY_RANK = {"critical": 3, "warning": 2, "info": 1}
-
 
 @dataclass
 class Relevance:
@@ -145,7 +143,7 @@ def analyze(
     # Structured adapters (e.g. the OpenAPI diff parser) know the severity from
     # the change itself, so trust that explicit hint over keyword matching.
     declared = getattr(entry, "severity", None)
-    if declared in _SEVERITY_RANK:
+    if declared in SEVERITIES:
         reason_parts = ["change: " + declared]
         if matched:
             reason_parts.append("matched: " + ", ".join(matched[:5]))
@@ -185,11 +183,6 @@ def analyze(
     )
 
 
-def severity_rank(severity: str) -> int:
-    """Rank a severity on the ``critical`` > ``warning`` > ``info`` ladder."""
-    return _SEVERITY_RANK.get(severity, 0)
-
-
 def meets_floor(severity: str, floor: str) -> bool:
     """Return whether ``severity`` ranks at or above the ``floor``."""
     return severity_rank(severity) >= severity_rank(floor)
@@ -198,4 +191,4 @@ def meets_floor(severity: str, floor: str) -> bool:
 def max_severity(severities: List[str]) -> str:
     if not severities:
         return "info"
-    return max(severities, key=lambda s: _SEVERITY_RANK.get(s, 0))
+    return max(severities, key=severity_rank)
