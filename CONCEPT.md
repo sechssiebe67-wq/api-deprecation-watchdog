@@ -228,6 +228,23 @@ heterogeneous noise into a single prioritized alert stream.
   and dedupe window use) and aggregated into `GET /api/stats`. The dashboard
   shows a compact `escalate Ns` indicator next to `cooldown Ns` and `dedupe Ns`,
   or `–` when unset.
+- **Per-source per-scan alert fan-out cap:** every source optionally carries a
+  positive integer `max_alerts_per_scan` (default `None`, i.e. no cap). When
+  set, at most that many alerts are actually fanned out from one scan; a source
+  that suddenly emits dozens of genuinely distinct entries (a vendor dumping a
+  batch of breaking changes, a statuspage flapping, an OpenAPI diff that
+  surfaces many structural changes at once) can no longer flood Slack, e-mail
+  and the webhook channel in a single tick. The remainder are still stored and
+  keep `notified = 0`, remain visible through `/api/entries`, `/api/alerts` and
+  `/api/export` and stay eligible for a later digest flush. Alerts are
+  prioritised by severity (`critical`, then `warning`, then `info`) with a
+  stable sort so equal-severity alerts keep their creation order and the most
+  dangerous changes always get through. The number held back is counted as
+  `alerts_suppressed` (the same field the cooldown, dedupe, escalation and
+  notification-floor filters use) and aggregated into `GET /api/stats`, and the
+  dashboard shows a compact `fanout N` indicator (or `fanout –` when unset).
+  Like the other notification filters it is *notification-only* — entries and
+  alerts are always stored — and a source with no cap behaves exactly as before.
 - **Per-source scan intervals:** every source optionally carries a
   `scan_interval_seconds` (a positive integer, default `None`). When set, the
   background scheduler polls that source on its own cadence; when omitted the
@@ -299,6 +316,7 @@ heterogeneous noise into a single prioritized alert stream.
   `scan_interval_seconds`, `scan_jitter_seconds` (integer or `NULL`, where
   `NULL`/`0` means no jitter), `max_bytes` (integer or `NULL`),
   `retention_days` (integer or `NULL`), `max_entries` (integer or `NULL`),
+  `max_alerts_per_scan` (integer or `NULL`, where `NULL` means no per-scan cap),
   `alert_cooldown_seconds` (integer or
   `NULL`), `alert_cooldown_jitter_seconds` (integer or `NULL`, where
   `NULL`/`0` means no jitter), `last_alert_at` (text, the last dispatch time that
@@ -415,9 +433,9 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `openapi_baseline`, `openapi_ignore_paths`, `failure_count`, `breaker_until`, `truncated`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `openapi_baseline` and `openapi_ignore_paths` (token protected) |
-| GET    | `/api/sources/:id`| Fetch one source (incl. `notify_min_severity`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `scan_jitter_seconds`, `retention_days`, `max_entries`, `openapi_baseline`, `openapi_ignore_paths` and breaker fields) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `max_alerts_per_scan`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `openapi_baseline`, `openapi_ignore_paths`, `failure_count`, `breaker_until`, `truncated`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `max_alerts_per_scan`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `openapi_baseline` and `openapi_ignore_paths` (token protected) |
+| GET    | `/api/sources/:id`| Fetch one source (incl. `notify_min_severity`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `scan_jitter_seconds`, `retention_days`, `max_entries`, `max_alerts_per_scan`, `openapi_baseline`, `openapi_ignore_paths` and breaker fields) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`, `?offset=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's `failure_count` and `breaker_until` (token protected) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
@@ -1068,6 +1086,57 @@ curl -X POST http://localhost:8080/api/sources \
        "min_severity":"info","notify_min_severity":"critical"}'
 ```
 
+## Alert fan-out cap
+
+The notification floor, the cooldown, the title-dedupe window and the severity
+escalation window all bound *when* a source may notify. None of them bounds
+*how many* alerts a single scan may fan out: a vendor that dumps a batch of
+genuinely distinct entries (ten breaking changes, a statuspage that flaps, an
+OpenAPI diff that surfaces dozens of structural changes at once) still fires one
+message per alert in one tick. The per-source `max_alerts_per_scan` caps that
+fan-out by count.
+
+- **Field:** `max_alerts_per_scan` is an optional positive integer on a source
+  (default `None`, i.e. no cap). `null` and omitted both mean "no cap" and
+  behave byte-for-byte like the pre-feature engine (same dispatch calls, same
+  `alerts_suppressed` count, same stored rows). A boolean, non-integer or
+  non-positive value is rejected with a `400` naming `max_alerts_per_scan`.
+- **Semantics:** in `Engine.scan_source`, when the source has a cap the new
+  alerts are ordered by severity rank (`critical` > `warning` > `info`) with a
+  *stable* sort, so equal-severity alerts keep their creation order, and only
+  the first `N` are handed to `Engine.dispatch`. The rest are held back from
+  this scan's fan-out. A source with fewer than `N` new alerts, or no cap, is
+  untouched.
+- **Digest composition:** the cap is a dispatch-time filter. With
+  `DIGEST_MODE=off` and `both` (`both` dispatches immediately with
+  `mark=False`) it limits the immediate fan-out; with `DIGEST_MODE=digest`
+  nothing is dispatched per scan, so the cap is deferred and does not interact
+  with the notification-floor accounting (an alert is never counted twice).
+- **Notification only:** a held-back alert is *not* deleted or hidden. It is
+  stored with `notified = 0`, appears in `GET /api/alerts`, `GET /api/entries`
+  and `GET /api/export`, participates in de-duplication as usual, and is still
+  returned by `Store.list_undigested_alerts()`, so the next digest flush
+  summarises it. Entries are always stored. This mirrors the `min_severity` /
+  notification-floor philosophy: persistence is separate from alerting.
+- **Accounting:** the number of alerts held back by the cap in a scan is added
+  to `alerts_suppressed` on the `ScanResult` / `POST /api/check` payload and
+  aggregated across sources into `GET /api/stats`. The dashboard shows a compact
+  `fanout N` indicator in each source's `Interval` cell, or `fanout –` when the
+  source is uncapped; no secret value is ever rendered.
+- **Migration:** databases created before this feature gain
+  `max_alerts_per_scan` automatically. Existing rows read back as `NULL`, so a
+  deployment that never sets the field is unchanged.
+
+```sh
+# A vendor that sometimes dumps dozens of breaking changes at once: store every
+# alert but fan out at most 3 per scan, highest severity first.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Batch vendor","url":"https://vendor.example/changelog.json",
+       "kind":"json","api_name":"Vendor","tracked_versions":["v2"],
+       "max_alerts_per_scan":3}'
+```
+
 ## Routing
 
 The optional `notify_channels` field on a source selects which notifier channels
@@ -1384,6 +1453,19 @@ indicator and leaves the pre-feature behaviour byte-for-byte unchanged when the
 field is unset or `0`. This closes the last gap in the *low-noise* story: a
 vendor that re-announces the same-severity change with a drifting title no
 longer pages on every re-announcement.
+
+*Shipped:* **per-source per-scan alert fan-out cap** (see *Current capabilities*
+and *Alert fan-out cap*) — an optional positive `max_alerts_per_scan` that
+bounds how many alerts one scan may fan out, ordering the new alerts by severity
+(`critical` first, stable on creation order) so the most dangerous changes
+always get through. The held-back alerts stay stored with `notified = 0` and
+remain digest-eligible, count as `alerts_suppressed` in `GET /api/stats`, and
+the dashboard shows a compact `fanout N` indicator. It composes with the
+notification floor, cooldown, dedupe and escalation filters and, in
+`DIGEST_MODE=digest`, leaves the floor accounting untouched (the cap is a
+dispatch-time filter). Omitting the field keeps the pre-feature behaviour
+byte-for-byte. This completes the *low-noise* story: the per-source notification
+throttles now bound both *when* and *how many* alerts a source can emit per scan.
 
 **Follow-ups this unlocks (not yet shipped):** the pagination primitive is in
 place but the dashboard has no "load more" affordance yet, and `GET /api/export`

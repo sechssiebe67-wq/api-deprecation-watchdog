@@ -85,6 +85,7 @@ class Source:
     max_bytes: Optional[int] = None
     retention_days: Optional[int] = None
     max_entries: Optional[int] = None
+    max_alerts_per_scan: Optional[int] = None
     alert_cooldown_seconds: Optional[int] = None
     alert_cooldown_jitter_seconds: Optional[int] = None
     dedupe_window_seconds: Optional[int] = None
@@ -162,6 +163,17 @@ class Source:
                 or max_entries <= 0
             ):
                 raise ValueError("max_entries must be a positive integer")
+        max_alerts = self.max_alerts_per_scan
+        if max_alerts is not None:
+            # ``bool`` is an ``int`` subclass but is not a meaningful count.
+            if (
+                isinstance(max_alerts, bool)
+                or not isinstance(max_alerts, int)
+                or max_alerts <= 0
+            ):
+                raise ValueError(
+                    "max_alerts_per_scan must be a positive integer"
+                )
         cooldown = self.alert_cooldown_seconds
         if cooldown is not None:
             # ``bool`` is an ``int`` subclass but is not a meaningful window.
@@ -361,6 +373,7 @@ class Source:
             "max_bytes": self.max_bytes,
             "retention_days": self.retention_days,
             "max_entries": self.max_entries,
+            "max_alerts_per_scan": self.max_alerts_per_scan,
             "alert_cooldown_seconds": self.alert_cooldown_seconds,
             "alert_cooldown_jitter_seconds": self.alert_cooldown_jitter_seconds,
             "dedupe_window_seconds": self.dedupe_window_seconds,

@@ -255,14 +255,12 @@ class Engine:
                 source.id, source.max_entries
             )
         if notify and new_alerts:
-            if self.digest_mode == "off":
-                result.alerts_suppressed += self.dispatch(new_alerts)
-            elif self.digest_mode == "both":
-                result.alerts_suppressed += self.dispatch(new_alerts, mark=False)
-            elif self.digest_mode == "digest":
-                # Held back for the next digest flush, but alerts below the
-                # notification floor will never be claimed by it, so account
-                # for them here exactly once (a flush does not re-count them).
+            if self.digest_mode == "digest":
+                # Nothing is dispatched immediately: the fan-out cap is a
+                # dispatch-time filter and is therefore deferred, while alerts
+                # below the notification floor will never be claimed by the
+                # digest, so account for them here exactly once (a flush does
+                # not re-count them).
                 floor_held = sum(
                     1
                     for alert in new_alerts
@@ -271,6 +269,20 @@ class Engine:
                 if floor_held:
                     self.store.record_suppressed_alerts({source.id: floor_held})
                     result.alerts_suppressed += floor_held
+            else:
+                selected, capped_out = self._apply_fanout_cap(source, new_alerts)
+                if capped_out:
+                    # Only the top-N alerts fan out from this scan; the rest
+                    # are held back from notification but stay stored with
+                    # ``notified = 0`` and remain eligible for a later digest.
+                    self.store.record_suppressed_alerts(
+                        {source.id: len(capped_out)}
+                    )
+                    result.alerts_suppressed += len(capped_out)
+                if self.digest_mode == "off":
+                    result.alerts_suppressed += self.dispatch(selected)
+                elif self.digest_mode == "both":
+                    result.alerts_suppressed += self.dispatch(selected, mark=False)
         return result
 
     def scan_sources(
@@ -359,6 +371,31 @@ class Engine:
             return True
         floor = source.notify_min_severity or source.min_severity
         return meets_floor(alert.severity, floor)
+
+    @staticmethod
+    def _apply_fanout_cap(
+        source: Optional[Source], alerts: List[Alert]
+    ):
+        """Split ``alerts`` into the dispatched top-N and the cap-held remainder.
+
+        When the source sets ``max_alerts_per_scan``, at most that many alerts
+        may fan out from one scan. The alerts are ordered by severity rank
+        (descending) with a *stable* sort, so equal-severity alerts keep their
+        creation order and the most dangerous changes always get through. The
+        first ``N`` are returned for dispatch and the rest are returned as the
+        held-back remainder. A source with no cap (or fewer alerts than the cap)
+        is passed through untouched, so the pre-feature behaviour is preserved
+        byte-for-byte.
+        """
+        if source is None or source.max_alerts_per_scan is None:
+            return list(alerts), []
+        cap = source.max_alerts_per_scan
+        if len(alerts) <= cap:
+            return list(alerts), []
+        ordered = sorted(
+            alerts, key=lambda alert: severity_rank(alert.severity), reverse=True
+        )
+        return ordered[:cap], ordered[cap:]
 
     def dispatch(self, alerts: List[Alert], mark: bool = True) -> int:
         """Fan alerts out to the notifiers each source is routed to.

@@ -108,6 +108,11 @@ def render_dashboard(
             label += " \u00b7 escalate %ss" % source.escalation_window_seconds
         else:
             label += " \u00b7 escalate \u2013"
+        if source.max_alerts_per_scan:
+            # Per-scan notification fan-out cap, e.g. ``fanout 3``.
+            label += " \u00b7 fanout %d" % source.max_alerts_per_scan
+        else:
+            label += " \u00b7 fanout \u2013"
         return label
 
     def _auth_indicator(source: Source) -> str:

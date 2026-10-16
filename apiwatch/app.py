@@ -209,6 +209,15 @@ def validate_source_payload(
             or max_entries <= 0
         ):
             raise ApiError(400, "'max_entries' must be a positive integer")
+    max_alerts_per_scan = payload.get("max_alerts_per_scan")
+    if max_alerts_per_scan is not None:
+        # ``bool`` is an ``int`` subclass but is not a meaningful count.
+        if (
+            isinstance(max_alerts_per_scan, bool)
+            or not isinstance(max_alerts_per_scan, int)
+            or max_alerts_per_scan <= 0
+        ):
+            raise ApiError(400, "'max_alerts_per_scan' must be a positive integer")
     alert_cooldown_seconds = payload.get("alert_cooldown_seconds")
     if alert_cooldown_seconds is not None:
         # ``bool`` is an ``int`` subclass but is not a meaningful window.
@@ -302,6 +311,7 @@ def validate_source_payload(
         max_bytes=max_bytes,
         retention_days=retention_days,
         max_entries=max_entries,
+        max_alerts_per_scan=max_alerts_per_scan,
         alert_cooldown_seconds=alert_cooldown_seconds,
         alert_cooldown_jitter_seconds=alert_cooldown_jitter_seconds,
         dedupe_window_seconds=dedupe_window_seconds,
