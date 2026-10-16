@@ -1058,15 +1058,46 @@ def _openapi_entry(change: dict, link: str, published: str) -> ParsedEntry:
     )
 
 
-def parse_openapi(text: str, base_url: str = "", selector: Optional[str] = None) -> List[ParsedEntry]:
+def _openapi_ignored(change: dict, ignore_paths: List[str]) -> bool:
+    """Return whether ``change`` targets one of the ignored dotted paths.
+
+    The affected path is represented as ``paths.<path>`` (for example a change
+    on ``/v2/legacy`` becomes ``paths./v2/legacy``). An entry matches when it is
+    exactly equal or is a prefix of the affected path on a ``/`` boundary, so
+    ``paths./v2/legacy`` also mutes ``paths./v2/legacy/sub`` without muting
+    ``paths./v2/legacyv2``.
+    """
+    if not ignore_paths:
+        return False
+    path = change.get("path")
+    if not path:
+        return False
+    affected = "paths." + str(path)
+    for entry in ignore_paths:
+        if affected == entry:
+            return True
+        if affected.startswith(entry) and affected[len(entry):len(entry) + 1] == "/":
+            return True
+    return False
+
+
+def parse_openapi(
+    text: str,
+    base_url: str = "",
+    selector: Optional[str] = None,
+    baseline: Optional[dict] = None,
+    ignore_paths: Optional[List[str]] = None,
+) -> List[ParsedEntry]:
     """Detect breaking-change signals by diffing OpenAPI/Swagger specs.
 
     The fetched document may be a single spec or a list of spec versions; the
     ``selector`` (dotted path) locates the list of versions, defaulting to the
     whole document treated as a single spec. A list is diffed pairwise (oldest
-    first); a single spec is diffed against the empty spec so first-time
-    registration surfaces the whole surface as ``info`` entries. Malformed or
-    non-JSON input yields an empty list and never raises.
+    first); a single spec is diffed against ``baseline`` when one is supplied,
+    otherwise against the empty spec so first-time registration surfaces the
+    whole surface as ``info`` entries. Any change whose affected path matches an
+    ``ignore_paths`` entry (exact match or prefix on a ``/`` boundary) is
+    dropped. Malformed or non-JSON input yields an empty list and never raises.
     """
     data = _load_openapi_json(text)
     if data is None:
@@ -1077,16 +1108,21 @@ def parse_openapi(text: str, base_url: str = "", selector: Optional[str] = None)
     if not specs:
         return []
 
-    if len(specs) == 1:
+    if baseline is not None:
+        pairs = [(baseline, specs[0])] + list(zip(specs, specs[1:]))
+    elif len(specs) == 1:
         pairs = [({}, specs[0])]
     else:
         pairs = list(zip(specs, specs[1:]))
 
+    ignored = list(ignore_paths or [])
     entries: List[ParsedEntry] = []
     for old_spec, new_spec in pairs:
         link = _openapi_link(new_spec, base_url)
         published = _openapi_version(new_spec)
         for change in _openapi_changes(old_spec, new_spec):
+            if _openapi_ignored(change, ignored):
+                continue
             entries.append(_openapi_entry(change, link, published))
     return entries
 
@@ -1094,7 +1130,14 @@ def parse_openapi(text: str, base_url: str = "", selector: Optional[str] = None)
 # --------------------------------------------------------------------------- #
 # Dispatch
 # --------------------------------------------------------------------------- #
-def parse(kind: str, text: str, base_url: str = "", selector: Optional[str] = None) -> List[ParsedEntry]:
+def parse(
+    kind: str,
+    text: str,
+    base_url: str = "",
+    selector: Optional[str] = None,
+    baseline: Optional[dict] = None,
+    ignore_paths: Optional[List[str]] = None,
+) -> List[ParsedEntry]:
     kind = (kind or "").lower()
     if kind == "rss":
         return parse_rss(text, base_url)
@@ -1109,5 +1152,5 @@ def parse(kind: str, text: str, base_url: str = "", selector: Optional[str] = No
     if kind == "gitlab":
         return parse_gitlab(text, base_url, selector)
     if kind == "openapi":
-        return parse_openapi(text, base_url, selector)
+        return parse_openapi(text, base_url, selector, baseline, ignore_paths)
     return []

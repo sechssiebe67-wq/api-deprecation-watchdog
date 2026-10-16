@@ -93,6 +93,8 @@ class Source:
     auth: Optional[str] = None
     extra_keywords: List[str] = field(default_factory=list)
     suppress_keywords: List[str] = field(default_factory=list)
+    openapi_baseline: Optional[dict] = None
+    openapi_ignore_paths: List[str] = field(default_factory=list)
     id: Optional[int] = None
     created_at: Optional[str] = None
     failure_count: int = 0
@@ -243,6 +245,13 @@ class Source:
         self.suppress_keywords = self._normalize_keywords(
             self.suppress_keywords, "suppress_keywords"
         )
+        if self.openapi_baseline is not None and not isinstance(
+            self.openapi_baseline, dict
+        ):
+            raise ValueError("openapi_baseline must be an object or None")
+        self.openapi_ignore_paths = self._normalize_ignore_paths(
+            self.openapi_ignore_paths
+        )
         if self.auth is not None:
             if not isinstance(self.auth, str) or self.auth.count(":") != 1:
                 raise ValueError("auth must be a 'user:password' string")
@@ -308,6 +317,31 @@ class Source:
                 normalized.append(term)
         return normalized
 
+    @staticmethod
+    def _normalize_ignore_paths(paths) -> List[str]:
+        """Normalize the OpenAPI ignore-path list to trimmed, unique entries.
+
+        ``None`` is treated as an empty list. Non-list values and non-string (or
+        blank) entries raise ``ValueError`` so a malformed allowlist cannot be
+        stored. Order is preserved and entries are kept case-sensitive, since
+        OpenAPI paths are case-sensitive. An entry is a dotted path such as
+        ``paths./v2/legacy`` (see :func:`apiwatch.parsers.parse_openapi`).
+        """
+        if paths is None:
+            return []
+        if not isinstance(paths, (list, tuple)):
+            raise ValueError("openapi_ignore_paths must be a list of strings")
+        normalized: List[str] = []
+        for entry in paths:
+            if not isinstance(entry, str) or not entry.strip():
+                raise ValueError(
+                    "openapi_ignore_paths must be a list of strings"
+                )
+            entry = entry.strip()
+            if entry not in normalized:
+                normalized.append(entry)
+        return normalized
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -336,6 +370,12 @@ class Source:
             "auth": self.auth,
             "extra_keywords": list(self.extra_keywords),
             "suppress_keywords": list(self.suppress_keywords),
+            "openapi_baseline": (
+                dict(self.openapi_baseline)
+                if isinstance(self.openapi_baseline, dict)
+                else None
+            ),
+            "openapi_ignore_paths": list(self.openapi_ignore_paths),
             "failure_count": self.failure_count,
             "breaker_until": self.breaker_until,
             "truncated": self.truncated,

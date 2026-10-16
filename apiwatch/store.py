@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS sources (
     auth TEXT,
     extra_keywords TEXT NOT NULL DEFAULT '[]',
     suppress_keywords TEXT NOT NULL DEFAULT '[]',
+    openapi_baseline TEXT,
+    openapi_ignore_paths TEXT NOT NULL DEFAULT '[]',
     failure_count INTEGER NOT NULL DEFAULT 0,
     breaker_until TEXT,
     truncated INTEGER NOT NULL DEFAULT 0,
@@ -170,6 +172,15 @@ class Store:
         if "suppress_keywords" not in source_columns:
             # Old rows keep ``NULL`` which is read back as ``[]``.
             self._conn.execute("ALTER TABLE sources ADD COLUMN suppress_keywords TEXT")
+        if "openapi_baseline" not in source_columns:
+            # Old rows keep ``NULL`` so they keep diffing against the empty spec.
+            self._conn.execute("ALTER TABLE sources ADD COLUMN openapi_baseline TEXT")
+        if "openapi_ignore_paths" not in source_columns:
+            # Old rows default to ``'[]'`` which is read back as ``[]``.
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN openapi_ignore_paths "
+                "TEXT NOT NULL DEFAULT '[]'"
+            )
         if "failure_count" not in source_columns:
             # Old rows default to ``0`` consecutive failures.
             self._conn.execute(
@@ -283,10 +294,11 @@ class Store:
                     dedupe_window_seconds,
                     escalation_window_seconds, headers, auth,
                     extra_keywords,
-                    suppress_keywords, failure_count, breaker_until, truncated,
+                    suppress_keywords, openapi_baseline, openapi_ignore_paths,
+                    failure_count, breaker_until, truncated,
                     last_alert_at, last_severity_alerts, alerts_suppressed,
                     created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -312,6 +324,12 @@ class Store:
                     source.auth,
                     json.dumps(source.extra_keywords or []),
                     json.dumps(source.suppress_keywords or []),
+                    (
+                        json.dumps(source.openapi_baseline)
+                        if source.openapi_baseline is not None
+                        else None
+                    ),
+                    json.dumps(source.openapi_ignore_paths or []),
                     source.failure_count,
                     source.breaker_until,
                     1 if source.truncated else 0,
@@ -900,6 +918,45 @@ def _parse_title_alerts(raw) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _parse_json_object(raw):
+    """Decode a JSON object column, returning ``None`` when unset or malformed.
+
+    Used for the optional ``openapi_baseline`` payload, so a legacy row (or a
+    value that is not a JSON object) can never crash a scan.
+    """
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _parse_string_list(raw) -> list:
+    """Decode a JSON list-of-strings column, defaulting to ``[]``.
+
+    ``NULL``, malformed JSON and JSON values that are not lists all read back as
+    an empty list; non-string or blank entries are dropped so a legacy row can
+    never poison the parser.
+    """
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(value, list):
+        return []
+    normalized = []
+    for entry in value:
+        if isinstance(entry, str) and entry.strip():
+            entry = entry.strip()
+            if entry not in normalized:
+                normalized.append(entry)
+    return normalized
+
+
 def _parse_severity_alerts(raw) -> dict:
     """Decode the ``last_severity_alerts`` JSON column into a dict.
 
@@ -945,6 +1002,8 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         auth=row["auth"],
         extra_keywords=json.loads(row["extra_keywords"] or "[]"),
         suppress_keywords=json.loads(row["suppress_keywords"] or "[]"),
+        openapi_baseline=_parse_json_object(row["openapi_baseline"]),
+        openapi_ignore_paths=_parse_string_list(row["openapi_ignore_paths"]),
         created_at=row["created_at"],
         failure_count=int(row["failure_count"] or 0),
         breaker_until=row["breaker_until"],
