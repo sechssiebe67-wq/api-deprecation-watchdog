@@ -200,6 +200,15 @@ def validate_source_payload(
             or retention_days <= 0
         ):
             raise ApiError(400, "'retention_days' must be a positive integer")
+    max_entries = payload.get("max_entries")
+    if max_entries is not None:
+        # ``bool`` is an ``int`` subclass but is not a meaningful count.
+        if (
+            isinstance(max_entries, bool)
+            or not isinstance(max_entries, int)
+            or max_entries <= 0
+        ):
+            raise ApiError(400, "'max_entries' must be a positive integer")
     alert_cooldown_seconds = payload.get("alert_cooldown_seconds")
     if alert_cooldown_seconds is not None:
         # ``bool`` is an ``int`` subclass but is not a meaningful window.
@@ -276,6 +285,7 @@ def validate_source_payload(
         scan_jitter_seconds=scan_jitter,
         max_bytes=max_bytes,
         retention_days=retention_days,
+        max_entries=max_entries,
         alert_cooldown_seconds=alert_cooldown_seconds,
         dedupe_window_seconds=dedupe_window_seconds,
         escalation_window_seconds=escalation_window_seconds,

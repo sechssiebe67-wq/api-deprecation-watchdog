@@ -135,6 +135,16 @@ def render_dashboard(
             return "%dd" % source.retention_days
         return "\u2013"
 
+    def _cap_label(source: Source) -> str:
+        """A compact ``cap N`` indicator, or ``cap –`` when the source has none.
+
+        Shown next to the retention label so the count bound is visible without
+        a new column; no secret value is ever rendered.
+        """
+        if source.max_entries:
+            return "cap %d" % source.max_entries
+        return "cap \u2013"
+
     def _notify_floor_label(source: Source) -> str:
         """A compact ``notify: <severity>`` or an en-dash when inheriting.
 
@@ -197,7 +207,12 @@ def render_dashboard(
                 _esc(_webhook_indicator(source)),
                 _esc(_auth_indicator(source)),
                 _esc(_keyword_indicator(source)),
-                _esc(_retention_label(source)),
+                (
+                    _esc(_retention_label(source))
+                    + '<span class="muted"> \u00b7 '
+                    + _esc(_cap_label(source))
+                    + "</span>"
+                ),
                 _health_cell(source),
                 _esc("enabled" if source.enabled else "disabled"),
                 _esc(source.id),
@@ -283,7 +298,7 @@ def render_dashboard(
   </table>
   <h2>Monitored sources</h2>
   <table>
-    <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Interval</th><th>Min severity</th><th>Channels</th><th class="col-hide">Webhook</th><th class="col-hide">Auth</th><th class="col-hide">Keywords</th><th class="col-hide">Retention</th><th>Health</th><th>Status</th><th>History</th></tr></thead>
+    <thead><tr><th>Name</th><th>Kind</th><th class="col-hide">API</th><th class="col-hide">Versions</th><th>Interval</th><th>Min severity</th><th>Channels</th><th class="col-hide">Webhook</th><th class="col-hide">Auth</th><th class="col-hide">Keywords</th><th class="col-hide">Retention / cap</th><th>Health</th><th>Status</th><th>History</th></tr></thead>
     <tbody>%s</tbody>
   </table>
   <p class="muted">JSON API: <code>/api/sources</code>, <code>/api/sources/:id/entries</code>, <code>/api/sources/:id/reset</code> (POST), <code>/api/alerts</code>, <code>/api/entries</code>, <code>/api/digests</code>, <code>/api/stats</code>, <code>/api/export</code>, <code>/api/check</code> (POST), <code>/api/prune</code> (POST), <code>/api/digest/flush</code> (POST).</p>

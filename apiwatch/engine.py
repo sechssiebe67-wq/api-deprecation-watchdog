@@ -36,6 +36,7 @@ class ScanResult:
     sources_truncated: int = 0
     entries_seen: int = 0
     entries_new: int = 0
+    entries_capped: int = 0
     alerts_created: int = 0
     alerts_suppressed: int = 0
     alerts: List[Alert] = field(default_factory=list)
@@ -50,6 +51,7 @@ class ScanResult:
             "sources_truncated": self.sources_truncated,
             "entries_seen": self.entries_seen,
             "entries_new": self.entries_new,
+            "entries_capped": self.entries_capped,
             "alerts_created": self.alerts_created,
             "alerts_suppressed": self.alerts_suppressed,
             "errors": list(self.errors),
@@ -237,6 +239,14 @@ class Engine:
 
         result.alerts_created = len(new_alerts)
         result.alerts = new_alerts
+        if source.max_entries is not None:
+            # Count-based cap: trim the source to its newest ``max_entries``
+            # entries after the scan has persisted everything, so a chatty
+            # dependency cannot grow the store past its bound. Only entries are
+            # removed; alerts and digests are never touched.
+            result.entries_capped += self.store.prune_entries_for_source(
+                source.id, source.max_entries
+            )
         if notify and new_alerts:
             if self.digest_mode == "off":
                 result.alerts_suppressed += self.dispatch(new_alerts)
@@ -269,6 +279,7 @@ class Engine:
             result.sources_truncated += sub.sources_truncated
             result.entries_seen += sub.entries_seen
             result.entries_new += sub.entries_new
+            result.entries_capped += sub.entries_capped
             result.alerts_created += sub.alerts_created
             result.alerts_suppressed += sub.alerts_suppressed
             result.alerts.extend(sub.alerts)
