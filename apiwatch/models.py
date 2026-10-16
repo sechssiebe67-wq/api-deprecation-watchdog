@@ -86,6 +86,7 @@ class Source:
     retention_days: Optional[int] = None
     max_entries: Optional[int] = None
     alert_cooldown_seconds: Optional[int] = None
+    alert_cooldown_jitter_seconds: Optional[int] = None
     dedupe_window_seconds: Optional[int] = None
     escalation_window_seconds: Optional[int] = None
     headers: Dict[str, str] = field(default_factory=dict)
@@ -166,6 +167,21 @@ class Source:
                 raise ValueError(
                     "alert_cooldown_seconds must be a non-negative integer"
                 )
+        cooldown_jitter = self.alert_cooldown_jitter_seconds
+        if cooldown_jitter is not None:
+            # ``bool`` is an ``int`` subclass but is not a meaningful jitter.
+            if (
+                isinstance(cooldown_jitter, bool)
+                or not isinstance(cooldown_jitter, int)
+                or cooldown_jitter < 0
+            ):
+                raise ValueError(
+                    "alert_cooldown_jitter_seconds must be a non-negative integer"
+                )
+            # ``0`` and ``None`` both mean "no jitter"; normalising keeps a single
+            # canonical representation in the store, the API and the engine.
+            if cooldown_jitter == 0:
+                self.alert_cooldown_jitter_seconds = None
         dedupe = self.dedupe_window_seconds
         if dedupe is not None:
             # ``bool`` is an ``int`` subclass but is not a meaningful window.
@@ -312,6 +328,7 @@ class Source:
             "retention_days": self.retention_days,
             "max_entries": self.max_entries,
             "alert_cooldown_seconds": self.alert_cooldown_seconds,
+            "alert_cooldown_jitter_seconds": self.alert_cooldown_jitter_seconds,
             "dedupe_window_seconds": self.dedupe_window_seconds,
             "escalation_window_seconds": self.escalation_window_seconds,
             "last_severity_alerts": dict(self.last_severity_alerts),

@@ -64,6 +64,21 @@ actually use.
   are summarised by the next digest. The last dispatch time is persisted, so the
   window survives a restart, and the held-back count is reported as
   `alerts_suppressed` on the check result and in `GET /api/stats`.
+- **Per-source alert-cooldown jitter**: each source can set an
+  `alert_cooldown_jitter_seconds` (non-negative integer, default none) that
+  spreads the effective `alert_cooldown_seconds` window by a deterministic,
+  source-id-derived offset, so a large registry in which many sources share the
+  same cooldown no longer releases their coalesced alerts on the same tick. The
+  effective cooldown is
+  `alert_cooldown_seconds + (source.id % (alert_cooldown_jitter_seconds + 1))`,
+  mirroring `scan_jitter_seconds` (same derivation, no randomness, stable for a
+  given `(id, jitter)` pair). It is notification-only — held-back alerts are
+  stored with `notified = 0`, appear in `/api/alerts`, `/api/entries` and
+  `/api/export`, stay eligible for a later digest and count as
+  `alerts_suppressed` — and a source with no cooldown (unset or `0`) is
+  unaffected. Omitting the field, sending `null` or `0` preserves the
+  pre-feature behaviour byte-for-byte, and the dashboard appends a compact
+  `+0-Ns` indicator when the jitter is set (for example `cooldown 300s +0-60s`).
 - **Per-source title dedupe window**: each source can set a
   `dedupe_window_seconds` (non-negative integer, default none) so a vendor that
   re-posts the same deprecation announcement with a slightly changed body or a
@@ -158,8 +173,10 @@ actually use.
 - **Digest notifications** that batch alerts into a single grouped, severity-
   ordered summary on a configurable cadence (`off`, `digest` or `both`).
 - **Web dashboard** with an `Interval` column showing each source's cadence (or
-  the global default), its jitter window when set (for example
-  `900s +0-300s`), its `cooldown Ns` alert-cooldown indicator when set, its
+  the global default), its scan-jitter window when set (for example
+  `900s +0-300s`), its `cooldown Ns` alert-cooldown indicator when set (with a
+  `+0-Ns` alert-cooldown-jitter window appended when set, for example
+  `cooldown 300s +0-60s`), its
   `dedupe Ns` title-dedupe indicator and its `escalate Ns` severity-escalation
   indicator (each `–` when unset), an
   `Auth` column showing a lock/header-count indicator
@@ -233,9 +250,9 @@ All configuration is environment based:
 | ------ | ------------------ | ----------------------------------------- |
 | GET    | `/healthz`         | Liveness / readiness probe                |
 | GET    | `/`                | HTML dashboard                            |
-| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `notify_min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `max_entries`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `notify_min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `max_entries`, `truncated`, `failure_count`, `breaker_until`) |
 | POST   | `/api/sources`     | Register a source (token protected)       |
-| GET    | `/api/sources/:id` | Fetch one source (incl. `min_severity`, `notify_min_severity`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `max_entries`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources/:id` | Fetch one source (incl. `min_severity`, `notify_min_severity`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `max_entries`, `truncated`, `failure_count`, `breaker_until`) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`, `?offset=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's breaker state (token protected) |
 | DELETE | `/api/sources/:id` | Remove a source (token protected)         |
@@ -270,6 +287,7 @@ Register a source. The `POST /api/sources` payload accepts:
 | `retention_days`   | no       | Positive integer retention window in days for this source's entries; omitted or `null` inherits the global `RETENTION_DAYS`. `0`, negative, non-integer and boolean values are rejected with a `400` |
 | `max_entries`      | no       | Positive integer cap on how many entries are kept for this source. After each successful scan the oldest entries beyond the cap are pruned; it composes with `retention_days` (the tighter bound wins) and never deletes alerts or digests. Omitted or `null` keeps the unbounded default; `0`, negative, non-integer and boolean values are rejected with a `400` |
 | `alert_cooldown_seconds` | no | Non-negative integer cooldown window (seconds) that suppresses repeat notifications from this source; omitted, `null` or `0` means no cooldown (the default). Negative, non-integer and boolean values are rejected with a `400` |
+| `alert_cooldown_jitter_seconds` | no | Non-negative integer window (seconds) added deterministically to `alert_cooldown_seconds` as `id % (jitter + 1)`, so sources that share a cooldown no longer release their alerts on the same tick. Only meaningful with `alert_cooldown_seconds` set; omitted, `null` or `0` means no jitter (the default). Negative, non-integer and boolean values are rejected with a `400` |
 | `dedupe_window_seconds` | no | Non-negative integer window (seconds) that suppresses re-notification of an alert whose normalized title (trimmed, whitespace-collapsed, case-folded) was already dispatched from this source; omitted, `null` or `0` means disabled (the default). Negative, non-integer and boolean values are rejected with a `400` |
 | `escalation_window_seconds` | no | Non-negative integer window (seconds) that suppresses re-notification of an alert whose severity was already dispatched from this source within the window; a higher-severity alert always escalates through. Omitted, `null` or `0` means disabled (the default). Negative, non-integer and boolean values are rejected with a `400` |
 | `headers`          | no       | JSON object of header name to string value sent on every fetch (merged over the defaults; names normalized case-insensitively) |
@@ -381,6 +399,41 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Noisy changelog","url":"https://noisy.example/changelog.json",
        "kind":"json","api_name":"Noisy","tracked_versions":["v2"],
        "alert_cooldown_seconds":3600}'
+```
+
+`alert_cooldown_jitter_seconds` spreads the effective alert-cooldown window so a
+large registry does not release every source's coalesced alerts on the same
+tick. It is a non-negative integer number of seconds; omitting it, sending
+`null` or sending `0` means no jitter and is byte-for-byte equivalent to the
+pre-feature engine. When set (and the source also has an
+`alert_cooldown_seconds`), the effective cooldown becomes
+`alert_cooldown_seconds + (source.id % (alert_cooldown_jitter_seconds + 1))`.
+The offset is derived from the source id — the same `id % (jitter + 1)`
+derivation as `scan_jitter_seconds` — and is never random, so the same
+`(id, jitter)` pair always yields the same offset and dispatch stays
+reproducible and testable. Like the base cooldown, jitter is *notification
+only*: held-back alerts are still stored with `notified = 0`, appear in
+`GET /api/entries`, `GET /api/alerts` and `GET /api/export`, stay eligible for a
+later digest, and are counted as `alerts_suppressed` in `GET /api/stats`; the
+`last_alert_at` dispatch time is still persisted, so a restart does not reset
+the jittered window. It composes with the notification floor, the title-dedupe
+window and the severity escalation window — an alert must clear all of them to
+be delivered. A source with no `alert_cooldown_seconds` (unset or `0`) is
+unaffected by any jitter value. A negative integer, a non-integer, a boolean or
+a non-numeric value is rejected with a `400` naming
+`alert_cooldown_jitter_seconds`. The dashboard appends a compact `+0-Ns`
+indicator after `cooldown Ns` when the jitter is set (for example
+`cooldown 300s +0-60s`) and leaves the existing `cooldown Ns` / `dedupe Ns` /
+`escalate Ns` output unchanged when it is unset.
+
+```sh
+# 50 sources share a one-hour cooldown: spread their release over an extra
+# deterministic 0-60s window per source id instead of all firing at once.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Shared upstream","url":"https://vendor.example/changelog.json",
+       "kind":"json","api_name":"Vendor","tracked_versions":["v2"],
+       "alert_cooldown_seconds":3600,"alert_cooldown_jitter_seconds":60}'
 ```
 
 `dedupe_window_seconds` coalesces re-notifications of the *same alert title*
