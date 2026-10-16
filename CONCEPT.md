@@ -267,7 +267,8 @@ heterogeneous noise into a single prioritized alert stream.
   `min_severity`),
   `scan_interval_seconds`, `scan_jitter_seconds` (integer or `NULL`, where
   `NULL`/`0` means no jitter), `max_bytes` (integer or `NULL`),
-  `retention_days` (integer or `NULL`), `alert_cooldown_seconds` (integer or
+  `retention_days` (integer or `NULL`), `max_entries` (integer or `NULL`),
+  `alert_cooldown_seconds` (integer or
   `NULL`), `last_alert_at` (text, the last dispatch time that anchors the
   cooldown),   `dedupe_window_seconds` (integer or `NULL`), `last_title_alerts`
   (JSON text, the map of normalized title -> ISO-8601 last dispatch time that
@@ -352,6 +353,20 @@ heterogeneous noise into a single prioritized alert stream.
   configurable maintenance cadence and `POST /api/prune` prunes on demand. The
   `sources` registry and `digests` are never pruned, so the catalog and the
   aggregate history stay intact.
+- **Per-source entry-count cap:** every source optionally carries a positive
+  integer `max_entries`. After each successful scan the engine deletes the oldest
+  entries for that source until at most `max_entries` remain (newest-first), so a
+  single chatty dependency cannot grow the SQLite store without bound even inside
+  its retention window. The cap is count-based and composes with the age-based
+  `retention_days` window: the tighter of the two bounds wins, so a source with
+  both keeps at most `min(N, entries within D days)`. Unlike the retention pass,
+  the cap never deletes alerts or digests: an alert whose entry was capped away
+  still appears in `GET /api/alerts` (and `/api/export`) with its stored `title`
+  and `link`, and `GET /api/digests` is untouched. Omitting the field (or
+  sending `null`) keeps today's unbounded behaviour byte-for-byte, so existing
+  databases and sources are unchanged. The number of entries dropped by the cap
+  is surfaced, together with the retention count, as `entries_pruned` in
+  `GET /api/stats`.
 - **Web dashboard:** an accessible overview of sources, recent alerts, recent
   digests, pending-digest alerts and scan statistics, plus a JSON API and a
   `Download JSON` link to the export endpoint.
@@ -365,9 +380,9 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
-| GET    | `/api/sources/:id`| Fetch one source (incl. `notify_min_severity`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `scan_jitter_seconds` and breaker fields) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
+| GET    | `/api/sources/:id`| Fetch one source (incl. `notify_min_severity`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `scan_jitter_seconds`, `retention_days`, `max_entries` and breaker fields) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`, `?offset=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's `failure_count` and `breaker_until` (token protected) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
@@ -378,7 +393,7 @@ heterogeneous noise into a single prioritized alert stream.
 | POST   | `/api/digest/flush`| Build and deliver a digest (token protected) |
 | POST   | `/api/check`      | Run a scan now (token protected)          |
 | POST   | `/api/prune`      | Prune entries past their retention window now (token protected); returns `entries_pruned` and `alerts_pruned` |
-| GET    | `/api/stats`      | Aggregate counters (incl. `sources_tripped` and `alerts_suppressed`) |
+| GET    | `/api/stats`      | Aggregate counters (incl. `sources_tripped`, `alerts_suppressed` and `entries_pruned`) |
 | GET    | `/api/export`     | Full JSON snapshot of sources, entries, alerts and digests (`?limit=`, default `1000`, max `10000`) |
 
 ## Data export
@@ -666,6 +681,51 @@ curl -X POST http://localhost:8080/api/sources \
 curl -X POST http://localhost:8080/api/prune \
   -H "Authorization: Bearer $API_TOKEN"
 # -> {"entries_pruned": 12, "alerts_pruned": 9}
+```
+
+## Entry-count cap
+
+Retention bounds history by *age*, but a source that emits hundreds of entries a
+day can still grow the store arbitrarily inside the window. The per-source
+`max_entries` cap bounds history by *count* instead, so one chatty dependency
+cannot crowd out a long-running deployment's SQLite file.
+
+- **Field:** `max_entries` is an optional positive integer on a source. Omitted
+  or `null` means "no cap"; `0`, negative integers, booleans, floats and strings
+  are rejected with a `400` naming `max_entries`. The value is stored in a new
+  `sources.max_entries` column and read back as `null` for databases created
+  before the column existed (a lightweight migration adds it automatically).
+- **When it runs:** `Engine.scan_source` calls
+  `Store.prune_entries_for_source(source_id, max_entries)` after a successful
+  scan, once it has persisted the scan's entries and recorded the truncation
+  flag, so a chatty source is trimmed on every scan rather than only on the
+  slower maintenance cadence. The number dropped is accumulated on
+  `ScanResult.entries_capped` and reported by `/api/check` alongside the other
+  per-scan counters.
+- **What it keeps:** the newest `max_entries` entries by the same
+  `created_at DESC, id DESC` order the history API uses, so
+  `GET /api/sources/:id/entries` never shows more than the cap. The prune deletes
+  only rows from `entries`; it never deletes `alerts`, `digests` or `sources`.
+  An alert whose entry was capped away keeps its own stored `title` and `link`
+  and still renders in `GET /api/alerts`, `/api/export` and the dashboard.
+- **Composition with retention:** the two bounds are independent and the tighter
+  one wins. Retention prunes by age in the maintenance pass and the cap prunes by
+  count on each scan, so a source with `retention_days = D` and
+  `max_entries = N` ends up holding at most `min(N, entries within D days)`.
+  A source without a cap is never touched by the cap path, so the default
+  behaviour is unchanged.
+- **Observability:** `GET /api/stats` reports `entries_pruned`, the running total
+  of entries removed by retention *and* by the cap since process start. It is `0`
+  when no source has a cap and no retention window is set. The dashboard's
+  `Retention` cell appends a compact `cap N` indicator next to the window (or
+  `cap –` when the source has no cap) without adding a column.
+
+```sh
+# Keep at most the 200 newest entries for one chatty dependency.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Chatty","url":"https://chatty.example/changelog.json",
+       "kind":"json","max_entries":200}'
 ```
 
 ## Alert cooldown
@@ -1114,6 +1174,17 @@ survive; a scheduler maintenance pass and the token-protected `POST /api/prune`
 endpoint prune on the chosen cadence, while `sources` and `digests` are never
 deleted. This is the next increment on top of the per-source history API and
 keeps a long-running deployment's SQLite file bounded.
+
+*Shipped:* **per-source entry-count cap** (see *Current capabilities* and
+*Entry-count cap*) — an optional positive `max_entries` trims each source to its
+N newest entries after every successful scan, complementing the age-based
+`retention_days` window so the tighter of the two bounds wins. The cap never
+deletes alerts or digests, so alerts whose entries were dropped still render with
+their stored title and link, and the total removed (retention plus cap) is
+surfaced as `entries_pruned` in `GET /api/stats` while the per-scan drop count is
+reported as `entries_capped`. The dashboard shows a compact `cap N` indicator
+next to the retention label, and omitting the field keeps the pre-feature
+behaviour byte-for-byte.
 
 *Shipped:* **per-source alert cooldown** (see *Current capabilities* and
 *Alert cooldown*) — an optional `alert_cooldown_seconds` on each source that

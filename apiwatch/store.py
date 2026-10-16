@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS sources (
     scan_jitter_seconds INTEGER,
     max_bytes INTEGER,
     retention_days INTEGER,
+    max_entries INTEGER,
     alert_cooldown_seconds INTEGER,
     dedupe_window_seconds INTEGER,
     escalation_window_seconds INTEGER,
@@ -115,6 +116,11 @@ class Store:
         self._conn.executescript(_SCHEMA)
         self._migrate()
         self._conn.commit()
+        # Cumulative entry counts removed since process start, split by the
+        # retention (age) pass and the per-source entry-count cap. ``stats``
+        # reports their sum as ``entries_pruned``.
+        self._entries_pruned_by_retention = 0
+        self._entries_pruned_by_cap = 0
 
     def _migrate(self) -> None:
         """Idempotently evolve pre-existing databases to the current schema."""
@@ -190,6 +196,11 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE sources ADD COLUMN retention_days INTEGER"
             )
+        if "max_entries" not in source_columns:
+            # Old rows keep ``NULL`` so they stay unbounded (no entry-count cap).
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN max_entries INTEGER"
+            )
         if "alert_cooldown_seconds" not in source_columns:
             # Old rows keep ``NULL`` (read back as no cooldown, i.e. the default).
             self._conn.execute(
@@ -261,14 +272,14 @@ class Store:
                    (name, url, kind, api_name, tracked_versions, enabled, selector,
                     min_severity, notify_min_severity, notify_channels,
                     notify_webhook_url, scan_interval_seconds,
-                    scan_jitter_seconds, max_bytes, retention_days,
+                    scan_jitter_seconds, max_bytes, retention_days, max_entries,
                     alert_cooldown_seconds, dedupe_window_seconds,
                     escalation_window_seconds, headers, auth,
                     extra_keywords,
                     suppress_keywords, failure_count, breaker_until, truncated,
                     last_alert_at, last_severity_alerts, alerts_suppressed,
                     created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -285,6 +296,7 @@ class Store:
                     source.scan_jitter_seconds,
                     source.max_bytes,
                     source.retention_days,
+                    source.max_entries,
                     source.alert_cooldown_seconds,
                     source.dedupe_window_seconds,
                     source.escalation_window_seconds,
@@ -611,7 +623,45 @@ class Store:
                 )
                 alerts_pruned += acur.rowcount
             self._conn.commit()
+            self._entries_pruned_by_retention += entries_pruned
         return {"entries_pruned": entries_pruned, "alerts_pruned": alerts_pruned}
+
+    def prune_entries_for_source(
+        self, source_id: int, max_entries: Optional[int]
+    ) -> int:
+        """Delete the oldest entries for one source beyond its count cap.
+
+        The newest ``max_entries`` entries, ordered by ``created_at DESC,
+        id DESC`` (the same order :meth:`list_entries_for_source` uses), are
+        kept and every older row is removed. Only the ``entries`` table is
+        touched: alerts and digests are **never** deleted, so an alert whose
+        entry was dropped still renders with its own stored title and link, and
+        ``GET /api/digests`` is unaffected. ``max_entries`` of ``None`` or ``<= 0``
+        disables the cap and deletes nothing. Returns the number of entries
+        deleted (also accumulated for ``stats``).
+        """
+        if max_entries is None or max_entries <= 0:
+            return 0
+        with self._lock:
+            stale = [
+                row["id"]
+                for row in self._conn.execute(
+                    """SELECT id FROM entries
+                       WHERE source_id = ?
+                       ORDER BY created_at DESC, id DESC
+                       LIMIT -1 OFFSET ?""",
+                    (source_id, max_entries),
+                ).fetchall()
+            ]
+            if not stale:
+                return 0
+            placeholders = ",".join("?" for _ in stale)
+            cur = self._conn.execute(
+                "DELETE FROM entries WHERE id IN (%s)" % placeholders, stale
+            )
+            self._conn.commit()
+            self._entries_pruned_by_cap += cur.rowcount
+            return cur.rowcount
 
     # -- alerts ------------------------------------------------------------ #
     def create_alert(self, alert: Alert) -> Optional[Alert]:
@@ -804,12 +854,16 @@ class Store:
             last_run = self._conn.execute(
                 "SELECT * FROM check_runs ORDER BY id DESC LIMIT 1"
             ).fetchone()
+            entries_pruned = (
+                self._entries_pruned_by_retention + self._entries_pruned_by_cap
+            )
         return {
             "sources": sources,
             "sources_enabled": enabled,
             "sources_tripped": tripped,
             "sources_truncated": truncated,
             "entries": entries,
+            "entries_pruned": entries_pruned,
             "alerts": alerts,
             "alerts_critical": critical,
             "alerts_warning": warning,
@@ -874,6 +928,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         scan_jitter_seconds=row["scan_jitter_seconds"],
         max_bytes=row["max_bytes"],
         retention_days=row["retention_days"],
+        max_entries=row["max_entries"],
         alert_cooldown_seconds=row["alert_cooldown_seconds"],
         dedupe_window_seconds=row["dedupe_window_seconds"],
         escalation_window_seconds=row["escalation_window_seconds"],

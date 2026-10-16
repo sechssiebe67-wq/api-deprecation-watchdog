@@ -134,6 +134,16 @@ actually use.
   hostile feed is skipped (reported as `sources_skipped`) instead of retried on
   every tick. A successful scan — or a call to `POST /api/sources/:id/reset` —
   clears the counter and breaker.
+- **Per-source entry-count cap**: each source can set a positive `max_entries`
+  that bounds its stored history by count. After every successful scan the oldest
+  entries beyond the cap are pruned (newest-first), so one chatty dependency
+  cannot grow the SQLite file without bound even inside its retention window. It
+  composes with `retention_days` — the tighter of the count and age bounds wins —
+  and **never deletes alerts or digests**, so an alert whose entry was pruned
+  still appears in `/api/alerts` with its stored title and link and
+  `/api/digests` is unaffected. Omitted or `null` keeps the unbounded default,
+  the dashboard shows a compact `cap N` indicator (or `cap –` when unset), and
+  `GET /api/stats` reports the total removed as `entries_pruned`.
 - **SQLite history** with content-hash de-duplication (no repeated alerts).
 - **Notifications** via Slack webhook, SMTP e-mail, a generic JSON webhook and
   console.
@@ -223,9 +233,9 @@ All configuration is environment based:
 | ------ | ------------------ | ----------------------------------------- |
 | GET    | `/healthz`         | Liveness / readiness probe                |
 | GET    | `/`                | HTML dashboard                            |
-| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `notify_min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `notify_min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `max_entries`, `truncated`, `failure_count`, `breaker_until`) |
 | POST   | `/api/sources`     | Register a source (token protected)       |
-| GET    | `/api/sources/:id` | Fetch one source (incl. `min_severity`, `notify_min_severity`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources/:id` | Fetch one source (incl. `min_severity`, `notify_min_severity`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `extra_keywords`, `suppress_keywords`, `max_bytes`, `retention_days`, `max_entries`, `truncated`, `failure_count`, `breaker_until`) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`, `?offset=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's breaker state (token protected) |
 | DELETE | `/api/sources/:id` | Remove a source (token protected)         |
@@ -233,7 +243,7 @@ All configuration is environment based:
 | GET    | `/api/entries`     | List parsed entries (`?source_id=`, `?limit=`, `?offset=`) |
 | GET    | `/api/digests`     | List digests, newest first (`?limit=`)    |
 | GET    | `/api/digests/:id` | Fetch one digest (`404` when unknown)     |
-| GET    | `/api/stats`       | Aggregate counters (incl. `sources_tripped` and `alerts_suppressed`) |
+| GET    | `/api/stats`       | Aggregate counters (incl. `sources_tripped`, `alerts_suppressed` and `entries_pruned`) |
 | GET    | `/api/export`      | Full JSON snapshot of sources, entries, alerts and digests (`?limit=`) |
 | POST   | `/api/check`       | Run a scan now (token protected)          |
 | POST   | `/api/prune`       | Prune entries past their retention window now (token protected); returns `{"entries_pruned": N, "alerts_pruned": M}` |
@@ -258,6 +268,7 @@ Register a source. The `POST /api/sources` payload accepts:
 | `scan_jitter_seconds` | no     | Non-negative integer window (seconds) added as a deterministic, id-derived offset to this source's due time so its polls are spread; omitted, `null` or `0` means no jitter |
 | `max_bytes`        | no       | Positive integer cap on the response body bytes read and stored for this source; omitted or `null` uses the global `FETCH_MAX_BYTES` |
 | `retention_days`   | no       | Positive integer retention window in days for this source's entries; omitted or `null` inherits the global `RETENTION_DAYS`. `0`, negative, non-integer and boolean values are rejected with a `400` |
+| `max_entries`      | no       | Positive integer cap on how many entries are kept for this source. After each successful scan the oldest entries beyond the cap are pruned; it composes with `retention_days` (the tighter bound wins) and never deletes alerts or digests. Omitted or `null` keeps the unbounded default; `0`, negative, non-integer and boolean values are rejected with a `400` |
 | `alert_cooldown_seconds` | no | Non-negative integer cooldown window (seconds) that suppresses repeat notifications from this source; omitted, `null` or `0` means no cooldown (the default). Negative, non-integer and boolean values are rejected with a `400` |
 | `dedupe_window_seconds` | no | Non-negative integer window (seconds) that suppresses re-notification of an alert whose normalized title (trimmed, whitespace-collapsed, case-folded) was already dispatched from this source; omitted, `null` or `0` means disabled (the default). Negative, non-integer and boolean values are rejected with a `400` |
 | `escalation_window_seconds` | no | Non-negative integer window (seconds) that suppresses re-notification of an alert whose severity was already dispatched from this source within the window; a higher-severity alert always escalates through. Omitted, `null` or `0` means disabled (the default). Negative, non-integer and boolean values are rejected with a `400` |
@@ -830,6 +841,31 @@ curl -X POST http://localhost:8080/api/sources \
 The dashboard's `Retention` column shows a source's `retention_days` as a
 compact `Nd` label (for example `7d`) or `–` when it is unset and inherits the
 global default; it never renders headers or credentials.
+
+### Entry-count cap
+
+Retention bounds history by age; an optional positive `max_entries` bounds it by
+count instead. After every successful scan the engine keeps only the newest
+`max_entries` entries for that source, so one chatty dependency cannot grow the
+SQLite file without bound inside its retention window. The two bounds compose —
+a source with `retention_days = D` and `max_entries = N` ends up with at most
+`min(N, entries within D days)` — and the tighter one wins. **The cap never
+deletes alerts or digests**, so an alert whose entry was pruned still appears in
+`/api/alerts` (and `/api/export`) with its stored title and link, and
+`/api/digests` is unaffected. Omitting the field (or sending `null`) keeps the
+unbounded default, so existing sources and databases are unchanged. The total
+removed by retention and by the cap since process start is reported as
+`entries_pruned` in `GET /api/stats`, and the dashboard shows a compact
+`cap N` label next to the retention window (`cap –` when the source is
+unbounded).
+
+```sh
+# Keep at most the 200 newest entries for one chatty dependency.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Chatty","url":"https://chatty.example/changelog.json",
+       "kind":"json","max_entries":200}'
+```
 
 ## Digest notifications
 

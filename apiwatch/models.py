@@ -84,6 +84,7 @@ class Source:
     scan_jitter_seconds: Optional[int] = None
     max_bytes: Optional[int] = None
     retention_days: Optional[int] = None
+    max_entries: Optional[int] = None
     alert_cooldown_seconds: Optional[int] = None
     dedupe_window_seconds: Optional[int] = None
     escalation_window_seconds: Optional[int] = None
@@ -149,6 +150,15 @@ class Source:
             # ``bool`` is an ``int`` subclass but is not a meaningful window.
             if isinstance(retention, bool) or not isinstance(retention, int) or retention <= 0:
                 raise ValueError("retention_days must be a positive integer")
+        max_entries = self.max_entries
+        if max_entries is not None:
+            # ``bool`` is an ``int`` subclass but is not a meaningful count.
+            if (
+                isinstance(max_entries, bool)
+                or not isinstance(max_entries, int)
+                or max_entries <= 0
+            ):
+                raise ValueError("max_entries must be a positive integer")
         cooldown = self.alert_cooldown_seconds
         if cooldown is not None:
             # ``bool`` is an ``int`` subclass but is not a meaningful window.
@@ -300,6 +310,7 @@ class Source:
             "scan_jitter_seconds": self.scan_jitter_seconds,
             "max_bytes": self.max_bytes,
             "retention_days": self.retention_days,
+            "max_entries": self.max_entries,
             "alert_cooldown_seconds": self.alert_cooldown_seconds,
             "dedupe_window_seconds": self.dedupe_window_seconds,
             "escalation_window_seconds": self.escalation_window_seconds,
