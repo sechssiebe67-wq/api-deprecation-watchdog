@@ -134,17 +134,21 @@ def render_dashboard(
         return "override" if source.notify_webhook_url else "\u2013"
 
     def _openapi_indicator(source: Source) -> str:
-        """A compact ``baseline`` / ``ignore N`` marker for an OpenAPI source.
+        """A compact marker for an OpenAPI/statuspage source's extra controls.
 
         The pinned baseline payload can be large and is never rendered: a source
         with a baseline shows ``baseline`` and a source with ignore paths shows
-        the count ``ignore N``. A source that sets neither shows an en-dash.
+        the count ``ignore N``. A statuspage source with a component filter shows
+        the count ``components N`` (never the component names/ids, though they
+        are not secrets). A source that sets none of these shows an en-dash.
         """
         parts = []
         if source.openapi_baseline is not None:
             parts.append("baseline")
         if source.openapi_ignore_paths:
             parts.append("ignore %d" % len(source.openapi_ignore_paths))
+        if source.statuspage_components:
+            parts.append("components %d" % len(source.statuspage_components))
         if not parts:
             return "\u2013"
         return " \u00b7 ".join(parts)

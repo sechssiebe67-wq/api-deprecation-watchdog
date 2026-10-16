@@ -292,12 +292,24 @@ def _apply_selector(data, selector: str):
 # --------------------------------------------------------------------------- #
 # statuspage.io
 # --------------------------------------------------------------------------- #
-def parse_statuspage(text: str, base_url: str = "", selector: Optional[str] = None) -> List[ParsedEntry]:
+def parse_statuspage(
+    text: str,
+    base_url: str = "",
+    selector: Optional[str] = None,
+    components: Optional[List[str]] = None,
+) -> List[ParsedEntry]:
     """Parse a statuspage.io JSON document.
 
     Reads the ``incidents`` and ``scheduled_maintenances`` arrays and maps each
     element to a :class:`ParsedEntry`. Malformed input (including non-JSON) is
     tolerated and yields an empty list rather than raising.
+
+    The optional ``components`` allowlist narrows the result to items that name
+    a matching component: a ``components[].name`` is matched case-insensitively
+    and a ``components[].id`` exactly. An item that names no component is kept
+    only when the allowlist is empty, so a non-empty filter never silently keeps
+    an unrelated incident. When ``components`` is empty the parser is identical
+    to the pre-filter behaviour.
     """
     if not text or not text.strip():
         return []
@@ -305,6 +317,7 @@ def parse_statuspage(text: str, base_url: str = "", selector: Optional[str] = No
         data = json.loads(text)
     except (ValueError, TypeError):
         return []
+    filters = _component_filters(components)
     try:
         if selector:
             data = _apply_selector(data, selector)
@@ -318,12 +331,53 @@ def parse_statuspage(text: str, base_url: str = "", selector: Optional[str] = No
             for item in items:
                 if not isinstance(item, dict):
                     continue
+                if filters and not _statuspage_matches_components(item, filters):
+                    continue
                 entry = _statuspage_entry(item, base_url)
                 if entry.title or entry.body:
                     entries.append(entry)
         return entries
     except Exception:  # defensive: malformed payloads must never crash a scan
         return []
+
+
+def _component_filters(components: Optional[List[str]]) -> List[str]:
+    """Return the trimmed, non-empty component filter entries.
+
+    The model and the API already normalize the list; this stays defensive so a
+    direct parser call can never raise on a malformed value.
+    """
+    if not components:
+        return []
+    return [
+        entry.strip()
+        for entry in components
+        if isinstance(entry, str) and entry.strip()
+    ]
+
+
+def _statuspage_matches_components(item: dict, filters: List[str]) -> bool:
+    """Return ``True`` when an incident names a component in the allowlist.
+
+    Each filter entry is compared against every affected component: a
+    ``components[].name`` matches case-insensitively while a ``components[].id``
+    matches exactly. An item whose ``components`` is missing or not a list never
+    matches, so it is dropped when the allowlist is non-empty.
+    """
+    raw = item.get("components")
+    if not isinstance(raw, list):
+        return False
+    for component in raw:
+        if not isinstance(component, dict):
+            continue
+        name = component.get("name")
+        component_id = component.get("id")
+        for wanted in filters:
+            if isinstance(name, str) and name.strip().lower() == wanted.lower():
+                return True
+            if component_id is not None and str(component_id) == wanted:
+                return True
+    return False
 
 
 def _statuspage_entry(item: dict, base_url: str) -> ParsedEntry:
@@ -1137,6 +1191,7 @@ def parse(
     selector: Optional[str] = None,
     baseline: Optional[dict] = None,
     ignore_paths: Optional[List[str]] = None,
+    components: Optional[List[str]] = None,
 ) -> List[ParsedEntry]:
     kind = (kind or "").lower()
     if kind == "rss":
@@ -1146,7 +1201,7 @@ def parse(
     if kind == "html":
         return parse_html(text, base_url, selector)
     if kind == "statuspage":
-        return parse_statuspage(text, base_url, selector)
+        return parse_statuspage(text, base_url, selector, components)
     if kind == "github":
         return parse_github(text, base_url, selector)
     if kind == "gitlab":
