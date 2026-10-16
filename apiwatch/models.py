@@ -96,6 +96,7 @@ class Source:
     suppress_keywords: List[str] = field(default_factory=list)
     openapi_baseline: Optional[dict] = None
     openapi_ignore_paths: List[str] = field(default_factory=list)
+    statuspage_components: List[str] = field(default_factory=list)
     id: Optional[int] = None
     created_at: Optional[str] = None
     failure_count: int = 0
@@ -264,6 +265,9 @@ class Source:
         self.openapi_ignore_paths = self._normalize_ignore_paths(
             self.openapi_ignore_paths
         )
+        self.statuspage_components = self._normalize_statuspage_components(
+            self.statuspage_components
+        )
         if self.auth is not None:
             if not isinstance(self.auth, str) or self.auth.count(":") != 1:
                 raise ValueError("auth must be a 'user:password' string")
@@ -354,6 +358,31 @@ class Source:
                 normalized.append(entry)
         return normalized
 
+    @staticmethod
+    def _normalize_statuspage_components(components) -> List[str]:
+        """Normalize the status-page component allowlist.
+
+        ``None`` is treated as an empty list. Non-list values and non-string (or
+        blank) entries raise ``ValueError`` so a malformed filter cannot be
+        stored. Entries are trimmed and de-duplicated in order and their case is
+        preserved: the parser matches ``components[].name`` case-insensitively
+        but ``components[].id`` exactly, so the stored spelling is meaningful.
+        """
+        if components is None:
+            return []
+        if not isinstance(components, (list, tuple)):
+            raise ValueError("statuspage_components must be a list of strings")
+        normalized: List[str] = []
+        for entry in components:
+            if not isinstance(entry, str) or not entry.strip():
+                raise ValueError(
+                    "statuspage_components must be a list of strings"
+                )
+            entry = entry.strip()
+            if entry not in normalized:
+                normalized.append(entry)
+        return normalized
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -389,6 +418,7 @@ class Source:
                 else None
             ),
             "openapi_ignore_paths": list(self.openapi_ignore_paths),
+            "statuspage_components": list(self.statuspage_components),
             "failure_count": self.failure_count,
             "breaker_until": self.breaker_until,
             "truncated": self.truncated,

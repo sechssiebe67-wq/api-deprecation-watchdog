@@ -43,6 +43,16 @@ actually use.
   Both default to off, so a source with neither field set behaves exactly as
   before; the dashboard shows a compact `baseline` / `ignore N` indicator and
   never renders the pinned payload.
+- **Per-source status-page component filter**: a `statuspage` source can carry a
+  `statuspage_components` list (component names or ids, default `[]`) so only
+  incidents and scheduled maintenances affecting the components a team actually
+  depends on are ingested. A `components[].name` is matched case-insensitively
+  (so `api`, `Api` and `API` all match) and a `components[].id` exactly (so
+  `abc123` does not match `ABC123`); an item that names no component is kept
+  only when the list is empty, and omitting the field keeps the previous
+  behaviour byte-for-byte. This stops a page that covers unrelated components
+  (marketing site, billing, and the API you depend on) from eroding trust in the
+  alert stream; the dashboard shows a compact `components N` indicator.
 - **Per-source selectors** for precise extraction: a CSS-like selector for
   `html` (`h2.deprecation`, `#changelog`) and a dotted path for `json`,
   `github`, `gitlab` and `openapi` (`data.releases`, `versions`). Dotted paths
@@ -206,7 +216,11 @@ actually use.
   `Auth` column showing a lock/header-count indicator
   (never the secret values), a `Webhook` column showing `override` (never the
   URL, which may embed a token), a `Keywords` column showing a compact
-  `+extra / -suppressed` count (`–` when both lists are empty), a `Health`
+  `+extra / -suppressed` count (`–` when both lists are empty), an `OpenAPI`
+  extra column showing a compact `baseline` / `ignore N` indicator for an
+  `openapi` source and a `components N` indicator for a filtered `statuspage`
+  source (`–` when unset, and never the component list or the pinned payload), a
+  `Health`
   column (`ok`, `N failures`, `truncated` for a clipped last scan, or
   `tripped until <time>` with a `Reset` action), a
   JSON API and a `Download JSON` link that snapshots the full state through
@@ -274,9 +288,9 @@ All configuration is environment based:
 | ------ | ------------------ | ----------------------------------------- |
 | GET    | `/healthz`         | Liveness / readiness probe                |
 | GET    | `/`                | HTML dashboard                            |
-| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `notify_min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `max_alerts_per_scan`, `extra_keywords`, `suppress_keywords`, `openapi_baseline`, `openapi_ignore_paths`, `max_bytes`, `retention_days`, `max_entries`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources`     | List monitored sources (incl. `min_severity`, `notify_min_severity`, `scan_interval_seconds`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `max_alerts_per_scan`, `extra_keywords`, `suppress_keywords`, `openapi_baseline`, `openapi_ignore_paths`, `statuspage_components`, `max_bytes`, `retention_days`, `max_entries`, `truncated`, `failure_count`, `breaker_until`) |
 | POST   | `/api/sources`     | Register a source (token protected)       |
-| GET    | `/api/sources/:id` | Fetch one source (incl. `min_severity`, `notify_min_severity`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `max_alerts_per_scan`, `extra_keywords`, `suppress_keywords`, `openapi_baseline`, `openapi_ignore_paths`, `max_bytes`, `retention_days`, `max_entries`, `truncated`, `failure_count`, `breaker_until`) |
+| GET    | `/api/sources/:id` | Fetch one source (incl. `min_severity`, `notify_min_severity`, `scan_jitter_seconds`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `max_alerts_per_scan`, `extra_keywords`, `suppress_keywords`, `openapi_baseline`, `openapi_ignore_paths`, `statuspage_components`, `max_bytes`, `retention_days`, `max_entries`, `truncated`, `failure_count`, `breaker_until`) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`, `?offset=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's breaker state (token protected) |
 | DELETE | `/api/sources/:id` | Remove a source (token protected)         |
@@ -321,6 +335,7 @@ Register a source. The `POST /api/sources` payload accepts:
 | `suppress_keywords`| no       | List of terms removed from the matched set before classification, so a noisy phrase can be muted per source (trimmed, lower-cased, default `[]`) |
 | `openapi_baseline` | no       | `openapi` only. JSON object (a pinned OpenAPI/Swagger spec) that the live document is diffed against instead of the empty spec, so the first scan emits only the changes relative to the baseline; omitted or `null` keeps the empty-spec behaviour. A non-object value is rejected with a `400` naming the field |
 | `openapi_ignore_paths` | no   | `openapi` only. List of dotted path or path-prefix strings whose structural changes are dropped before an entry is emitted, for example `paths./internal/health` or `paths./v2/legacy`; exact match or prefix on a `/` boundary. Entries are trimmed, de-duplicated and case-sensitive; default `[]`. A non-list value or a blank entry is rejected with a `400` naming the field |
+| `statuspage_components` | no  | `statuspage` only. List of component names or ids (default `[]`). When set, only incidents and scheduled maintenances affecting a listed component are ingested: a `components[].name` is matched case-insensitively and a `components[].id` exactly, and an item that names no component is kept only when the list is empty. Entries are trimmed, de-duplicated and kept case-sensitive. A non-list value or a non-string/blank entry is rejected with a `400` naming the field |
 
 For `html`, `selector` is a CSS-like simple selector (optional tag, `#id`,
 `.class`, or a combination). It matches a block when the block or an ancestor
@@ -419,6 +434,37 @@ between the pinned `2.0.0` spec and the live document, minus any change under
 `baseline · ignore 2` indicator and never renders the pinned payload; `GET
 /api/sources` and `GET /api/sources/:id` return both fields, defaulting to
 `null` and `[]`. A source with neither field set scans identically to before.
+
+### Filtering status-page components
+
+A statuspage.io page often covers many unrelated components — a vendor's
+marketing site, its billing system and the API you actually depend on all share
+one incident feed — so ingesting every incident and scheduled maintenance floods
+the alert stream with changes that cannot affect your integration. The optional
+`statuspage_components` list on a `statuspage` source narrows ingestion to the
+components you care about:
+
+```sh
+# Only ingest incidents and maintenances affecting the API component
+# (by name, case-insensitively) or the component with id "abc123" (exactly).
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Acme Status","url":"https://status.acme.com/api/v2/incidents.json",
+       "kind":"statuspage","api_name":"Acme","tracked_versions":["v1"],
+       "statuspage_components":["API","abc123"]}'
+```
+
+A `components[].name` is matched case-insensitively (so `api`, `Api` and `API`
+all match) and a `components[].id` exactly (so `abc123` matches but `ABC123`
+does not). An item that names no component is kept only when the list is empty,
+so a non-empty filter never silently keeps an unrelated incident. Entries are
+trimmed, de-duplicated and kept case-sensitive; a non-list value or a
+non-string/blank entry is rejected with a `400` naming `statuspage_components`.
+Omitting the field keeps the previous behaviour byte-for-byte: every incident
+and maintenance is ingested exactly as before. The list is returned by
+`GET /api/sources` and `GET /api/sources/:id`, old databases are migrated to read
+back `[]`, and the dashboard's `OpenAPI` extra column shows a compact
+`components N` indicator (`–` when unset).
 
 `min_severity` controls the per-source alert floor. The relevance engine still
 classifies and stores every matched entry, but only entries whose severity ranks

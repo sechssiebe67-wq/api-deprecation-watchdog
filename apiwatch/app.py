@@ -294,6 +294,7 @@ def validate_source_payload(
     if openapi_baseline is not None and not isinstance(openapi_baseline, dict):
         raise ApiError(400, "'openapi_baseline' must be a JSON object or null")
     openapi_ignore_paths = _validate_ignore_paths(payload)
+    statuspage_components = _validate_string_list(payload, "statuspage_components")
     return Source(
         name=name,
         url=url,
@@ -322,6 +323,7 @@ def validate_source_payload(
         suppress_keywords=suppress_keywords,
         openapi_baseline=openapi_baseline,
         openapi_ignore_paths=openapi_ignore_paths,
+        statuspage_components=statuspage_components,
     )
 
 
@@ -343,6 +345,30 @@ def _validate_ignore_paths(payload: dict) -> List[str]:
         entry = entry.strip()
         if not entry:
             raise ApiError(400, "'openapi_ignore_paths' must be a list of strings")
+        if entry not in normalized:
+            normalized.append(entry)
+    return normalized
+
+
+def _validate_string_list(payload: dict, field: str) -> List[str]:
+    """Validate an optional list-of-strings field.
+
+    Missing values (or ``null``) become an empty list. A non-list value, a
+    non-string entry or a blank entry is rejected with a ``400`` naming the
+    field. Valid entries are trimmed and de-duplicated in order and their case
+    is preserved, matching the model's normalization (``statuspage_components``
+    names are later matched case-insensitively and ids exactly).
+    """
+    value = payload.get(field)
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(entry, str) for entry in value):
+        raise ApiError(400, "'%s' must be a list of strings" % field)
+    normalized: List[str] = []
+    for entry in value:
+        entry = entry.strip()
+        if not entry:
+            raise ApiError(400, "'%s' must be a list of strings" % field)
         if entry not in normalized:
             normalized.append(entry)
     return normalized

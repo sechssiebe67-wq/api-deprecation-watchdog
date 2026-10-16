@@ -110,6 +110,18 @@ heterogeneous noise into a single prioritized alert stream.
   non-integer segment applied to a list, and an out-of-range (including
   negative-into-empty) index each leave the walk with no value, so the parser
   returns no entries and the source scans cleanly.
+- **Per-source status-page component filter:** a `statuspage` source may carry a
+  `statuspage_components` list (component names or ids, default `[]`). When set,
+  only incidents and scheduled maintenances whose affected component matches an
+  entry are emitted: a `components[].name` is matched case-insensitively and a
+  `components[].id` exactly, and an item that names no component is kept only
+  when the list is empty, so nothing is silently dropped by default. When the
+  list is unset the parser is byte-for-byte identical to before this control, so
+  a page that covers many unrelated components (a vendor's marketing site,
+  billing, and the API a team actually depends on) no longer drowns the alert
+  stream in incidents that cannot affect the integration. Values are trimmed,
+  de-duplicated and kept case-sensitive on registration and stored JSON-encoded
+  in the `sources` table.
 - **Relevance engine:** detects deprecation / breaking-change language
   (`deprecated`, `sunset`, `end of life`, `removed`, `breaking`, …) and boosts
   entries that mention a tracked version. Classifies each hit as
@@ -331,7 +343,7 @@ heterogeneous noise into a single prioritized alert stream.
   `extra_keywords` and `suppress_keywords` (JSON text),
   `openapi_baseline` (JSON text or `NULL`, where `NULL` means "diff against the
   empty spec") and `openapi_ignore_paths` (JSON text, read back as `[]` when
-  unset),
+  unset), `statuspage_components` (JSON text, read back as `[]` when unset),
   `failure_count` (integer, default `0`), `breaker_until` (text) and
   `truncated` (integer, default `0`), and a
   lightweight migration adds each column to databases created before it existed,
@@ -433,9 +445,9 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `max_alerts_per_scan`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `openapi_baseline`, `openapi_ignore_paths`, `failure_count`, `breaker_until`, `truncated`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `max_alerts_per_scan`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `openapi_baseline` and `openapi_ignore_paths` (token protected) |
-| GET    | `/api/sources/:id`| Fetch one source (incl. `notify_min_severity`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `scan_jitter_seconds`, `retention_days`, `max_entries`, `max_alerts_per_scan`, `openapi_baseline`, `openapi_ignore_paths` and breaker fields) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `max_alerts_per_scan`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `openapi_baseline`, `openapi_ignore_paths`, `statuspage_components`, `failure_count`, `breaker_until`, `truncated`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `max_alerts_per_scan`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `openapi_baseline`, `openapi_ignore_paths` and `statuspage_components` (token protected) |
+| GET    | `/api/sources/:id`| Fetch one source (incl. `notify_min_severity`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `scan_jitter_seconds`, `retention_days`, `max_entries`, `max_alerts_per_scan`, `openapi_baseline`, `openapi_ignore_paths`, `statuspage_components` and breaker fields) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`, `?offset=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's `failure_count` and `breaker_until` (token protected) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
@@ -534,6 +546,46 @@ curl -X POST http://localhost:8080/api/sources \
 
 # The first scan now reports only what changed since 2.0.0, minus the ignored
 # prefixes; everything else is silent, so `min_severity` can stay at `info`.
+```
+
+## Status-page component filter
+
+A statuspage.io page often covers many unrelated components: a vendor's
+marketing site, its billing system and the API a team actually depends on all
+share one incident feed. Ingesting every incident and scheduled maintenance
+means the team is alerted for changes that cannot affect its integration, which
+erodes trust and pushes operators to mute the source entirely — losing the
+signal they wanted. The optional per-source `statuspage_components` list
+narrows a `statuspage` source to the components that matter.
+
+- **Field:** `statuspage_components` is an optional list of component names or
+  ids (default `[]`). Entries are trimmed, de-duplicated in order and kept
+  case-sensitive on registration; a non-list value or a non-string / blank entry
+  is rejected with `400 {"error": "'statuspage_components' must be a list of
+  strings"}`.
+- **Matching:** a filter entry matches an incident's or maintenance's affected
+  component when it equals a `components[].name` case-insensitively (so `api`,
+  `Api` and `API` all match) *or* a `components[].id` exactly (so `abc123`
+  matches `id: "abc123"` but not `id: "ABC123"`). An item is kept when any of
+  its components matches any entry.
+- **Empty filter is inert:** a source registered without the field behaves
+  byte-for-byte as before, including items that name no component at all. When
+  the list is non-empty, an item with an empty or missing `components` list is
+  dropped, so nothing is silently kept by default.
+- **Persistence:** the list is stored JSON-encoded in the `sources` table and
+  returned by `GET /api/sources` and `GET /api/sources/:id`; databases created
+  before the column existed are migrated automatically and read back as `[]`.
+- **Dashboard:** the `OpenAPI` extra cell shows a compact `components N`
+  indicator for a filtered statuspage source (or `–` when unset); component
+  names and ids are not secrets but the indicator never renders the list.
+
+```sh
+# A statuspage that covers marketing, billing and the API: only ingest the API.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Acme Status","url":"https://status.acme.com/api/v2/incidents.json",
+       "kind":"statuspage","api_name":"Acme","tracked_versions":["v1"],
+       "statuspage_components":["API","abc123"]}'
 ```
 
 ## Selector syntax
@@ -1466,6 +1518,21 @@ notification floor, cooldown, dedupe and escalation filters and, in
 dispatch-time filter). Omitting the field keeps the pre-feature behaviour
 byte-for-byte. This completes the *low-noise* story: the per-source notification
 throttles now bound both *when* and *how many* alerts a source can emit per scan.
+
+*Shipped:* **per-source status-page component filter** (see *Current capabilities*
+and *Status-page component filter*) — an optional `statuspage_components` list
+that narrows a `statuspage` source to the components (matched by name
+case-insensitively or by id exactly) a team actually depends on. An item that
+names no component is kept only when the list is empty, the empty-filter path is
+byte-for-byte unchanged, and the dashboard shows a compact `components N`
+indicator. This directly advances the *Smarter relevance* item below: a page that
+covers many unrelated components no longer erodes trust in the alert stream.
+
+**Next candidate (not yet shipped):** extend the same component-scoped idea to
+the status/impact axis — an optional per-source filter on an incident's `status`
+(for example ignore `resolved`) or `impact` (for example only
+`critical`/`major`) — and to statuspage component *groups*, so operators can
+scope even more precisely without muting an entire source.
 
 **Follow-ups this unlocks (not yet shipped):** the pagination primitive is in
 place but the dashboard has no "load more" affordance yet, and `GET /api/export`

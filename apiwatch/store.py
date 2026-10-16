@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS sources (
     suppress_keywords TEXT NOT NULL DEFAULT '[]',
     openapi_baseline TEXT,
     openapi_ignore_paths TEXT NOT NULL DEFAULT '[]',
+    statuspage_components TEXT NOT NULL DEFAULT '[]',
     failure_count INTEGER NOT NULL DEFAULT 0,
     breaker_until TEXT,
     truncated INTEGER NOT NULL DEFAULT 0,
@@ -182,6 +183,13 @@ class Store:
                 "ALTER TABLE sources ADD COLUMN openapi_ignore_paths "
                 "TEXT NOT NULL DEFAULT '[]'"
             )
+        if "statuspage_components" not in source_columns:
+            # Old rows default to ``'[]'`` which is read back as ``[]`` (no
+            # component filter, so every incident is kept as before).
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN statuspage_components "
+                "TEXT NOT NULL DEFAULT '[]'"
+            )
         if "failure_count" not in source_columns:
             # Old rows default to ``0`` consecutive failures.
             self._conn.execute(
@@ -302,10 +310,11 @@ class Store:
                     escalation_window_seconds, headers, auth,
                     extra_keywords,
                     suppress_keywords, openapi_baseline, openapi_ignore_paths,
+                    statuspage_components,
                     failure_count, breaker_until, truncated,
                     last_alert_at, last_severity_alerts, alerts_suppressed,
                     created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -338,6 +347,7 @@ class Store:
                         else None
                     ),
                     json.dumps(source.openapi_ignore_paths or []),
+                    json.dumps(source.statuspage_components or []),
                     source.failure_count,
                     source.breaker_until,
                     1 if source.truncated else 0,
@@ -1013,6 +1023,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         suppress_keywords=json.loads(row["suppress_keywords"] or "[]"),
         openapi_baseline=_parse_json_object(row["openapi_baseline"]),
         openapi_ignore_paths=_parse_string_list(row["openapi_ignore_paths"]),
+        statuspage_components=_parse_string_list(row["statuspage_components"]),
         created_at=row["created_at"],
         failure_count=int(row["failure_count"] or 0),
         breaker_until=row["breaker_until"],
