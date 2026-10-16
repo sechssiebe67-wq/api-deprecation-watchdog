@@ -155,6 +155,28 @@ heterogeneous noise into a single prioritized alert stream.
   re-announces the same deprecation, or emits many near-identical entries in a
   short window, therefore no longer floods Slack, e-mail or the webhook channel
   with duplicates.
+- **Per-source alert-cooldown jitter:** every source optionally carries an
+  `alert_cooldown_jitter_seconds` (a non-negative integer, default `None` / `0`,
+  which means no jitter and is byte-for-byte equivalent to the pre-feature
+  behaviour). It spreads the effective alert-cooldown window by a deterministic,
+  source-id-derived offset so a large registry in which many sources share the
+  same `alert_cooldown_seconds` no longer releases their coalesced alerts on the
+  same tick. The effective cooldown becomes
+  `alert_cooldown_seconds + (source.id % (alert_cooldown_jitter_seconds + 1))`
+  when the jitter is set — the same `id % (jitter + 1)` derivation as
+  `scan_jitter_seconds`, with no randomness — and is byte-for-byte identical to
+  today's behaviour when the jitter is omitted, `null` or `0`. It composes with
+  `alert_cooldown_seconds` and the other notification filters (the notification
+  floor, the title-dedupe window and the severity escalation window): an alert
+  must clear all of them, applied to the jittered cooldown, to be delivered. A
+  source with no `alert_cooldown_seconds` (or `0`) is unaffected regardless of
+  the jitter value. Like the existing cooldown it is *notification-only*: the
+  entry and its alert are still stored, keep `notified = 0`, remain visible via
+  `/api/entries`, `/api/alerts` and `/api/export` and stay eligible for a later
+  digest, and `last_alert_at` is still persisted so a restart does not reset the
+  window. Held-back alerts are counted as `alerts_suppressed`, and the dashboard
+  shows a compact indicator only when the jitter is set (for example
+  `cooldown 300s +0-60s`), never rendering any secret value.
 - **Per-source title dedupe window:** every source optionally carries a
   `dedupe_window_seconds` (a non-negative integer, default `None` / `0`, which
   means disabled and is byte-for-byte equivalent to the pre-feature behaviour).
@@ -269,8 +291,9 @@ heterogeneous noise into a single prioritized alert stream.
   `NULL`/`0` means no jitter), `max_bytes` (integer or `NULL`),
   `retention_days` (integer or `NULL`), `max_entries` (integer or `NULL`),
   `alert_cooldown_seconds` (integer or
-  `NULL`), `last_alert_at` (text, the last dispatch time that anchors the
-  cooldown),   `dedupe_window_seconds` (integer or `NULL`), `last_title_alerts`
+  `NULL`), `alert_cooldown_jitter_seconds` (integer or `NULL`, where
+  `NULL`/`0` means no jitter), `last_alert_at` (text, the last dispatch time that
+  anchors the cooldown),   `dedupe_window_seconds` (integer or `NULL`), `last_title_alerts`
   (JSON text, the map of normalized title -> ISO-8601 last dispatch time that
   anchors the per-title dedupe window, read back as `{}` when unset),
   `escalation_window_seconds` (integer or `NULL`) and `last_severity_alerts`
@@ -380,9 +403,9 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
-| GET    | `/api/sources/:id`| Fetch one source (incl. `notify_min_severity`, `alert_cooldown_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `scan_jitter_seconds`, `retention_days`, `max_entries` and breaker fields) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `max_entries`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
+| GET    | `/api/sources/:id`| Fetch one source (incl. `notify_min_severity`, `alert_cooldown_seconds`, `alert_cooldown_jitter_seconds`, `dedupe_window_seconds`, `escalation_window_seconds`, `last_severity_alerts`, `scan_jitter_seconds`, `retention_days`, `max_entries` and breaker fields) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`, `?offset=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's `failure_count` and `breaker_until` (token protected) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
@@ -771,6 +794,56 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Noisy changelog","url":"https://noisy.example/changelog.json",
        "kind":"json","api_name":"Noisy","tracked_versions":["v2"],
        "alert_cooldown_seconds":3600}'
+```
+
+### Alert-cooldown jitter
+
+A large registry often assigns the *same* `alert_cooldown_seconds` to many
+sources, so their cooldown windows all expire on the same tick and their
+coalesced alerts release in a burst. The optional
+`alert_cooldown_jitter_seconds` spreads that release deterministically.
+
+- **Field:** `alert_cooldown_jitter_seconds` is an optional non-negative integer
+  on a source (default `None` / `0`). `null`, omitted and `0` all mean "no
+  jitter" and behave byte-for-byte like the pre-feature engine (same dispatch
+  decisions, same `alerts_suppressed` count). A boolean, negative, non-integer
+  or non-numeric value is rejected with a `400` naming
+  `alert_cooldown_jitter_seconds`.
+- **Semantics:** the effective cooldown for a source becomes
+  `alert_cooldown_seconds + (source.id % (alert_cooldown_jitter_seconds + 1))`
+  when the jitter is set. The offset is derived from the source id — the same
+  `id % (jitter + 1)` derivation as `scan_jitter_seconds` — and is never random,
+  so the same `(id, jitter)` pair always yields the same offset and dispatch
+  stays reproducible and testable. It composes with `alert_cooldown_seconds` and
+  the other notification filters (the notification floor, the title-dedupe
+  window and the severity escalation window): an alert must clear all of them,
+  applied to the jittered cooldown, to be delivered.
+- **No cooldown:** a source with `alert_cooldown_seconds` unset or `0` is
+  unaffected by any `alert_cooldown_jitter_seconds` value, because the jitter is
+  added to a zero window and the source has no cooldown to begin with.
+- **Notification only:** like the base cooldown, a held-back alert is *not*
+  deleted or hidden. It is stored with `notified = 0`, appears in
+  `GET /api/alerts`, `GET /api/entries` and `GET /api/export`, and stays eligible
+  for a later digest. `last_alert_at` is still persisted per source, so a restart
+  does not reset the (jittered) window.
+- **Accounting:** the held-back alerts are added to the same `alerts_suppressed`
+  counter the cooldown uses and aggregated by `GET /api/stats`. The dashboard
+  appends a compact `+0-Ns` window after the `cooldown Ns` indicator when the
+  jitter is set (for example `cooldown 300s +0-60s`); the base `cooldown Ns` /
+  `dedupe Ns` / `escalate Ns` output is unchanged when the jitter is unset, and
+  no secret value is ever rendered.
+- **Migration:** databases created before this feature gain
+  `alert_cooldown_jitter_seconds` automatically, with old rows read back as
+  `null` (no jitter), so existing deployments are unchanged.
+
+```sh
+# 50 sources share a one-hour cooldown against the same upstream: spread their
+# release over an extra deterministic 0-60s window per source id.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Shared upstream","url":"https://vendor.example/changelog.json",
+       "kind":"json","api_name":"Vendor","tracked_versions":["v2"],
+       "alert_cooldown_seconds":3600,"alert_cooldown_jitter_seconds":60}'
 ```
 
 ## Alert dedupe window
@@ -1195,6 +1268,18 @@ stored with `notified = 0` and are summarised by the next digest, so persistence
 and alerting remain separate. This directly advances the *low noise / smarter
 relevance* goal: a re-announced deprecation no longer floods Slack, e-mail or
 the webhook channel with duplicates.
+
+*Shipped:* **per-source alert-cooldown jitter** (see *Current capabilities* and
+*Alert cooldown*) — an optional `alert_cooldown_jitter_seconds` that adds a
+deterministic, id-derived offset
+(`id % (jitter + 1)`) to a source's effective `alert_cooldown_seconds`, so a
+large registry in which many sources share the same cooldown no longer releases
+their coalesced alerts on the same tick. It mirrors `scan_jitter_seconds` but
+applies to notification dispatch; it composes with the other notification
+filters, is notification-only (held-back alerts stay stored with
+`notified = 0` and count as `alerts_suppressed`), leaves a source with no
+cooldown untouched, adds a compact `+0-Ns` dashboard indicator and keeps the
+pre-feature behaviour byte-for-byte when the field is unset, `null` or `0`.
 
 *Shipped:* **per-source notification floor** (see *Current capabilities* and
 *Notification floor*) — an optional `notify_min_severity` that defaults to

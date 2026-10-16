@@ -220,6 +220,18 @@ def validate_source_payload(
             raise ApiError(
                 400, "'alert_cooldown_seconds' must be a non-negative integer"
             )
+    alert_cooldown_jitter_seconds = payload.get("alert_cooldown_jitter_seconds")
+    if alert_cooldown_jitter_seconds is not None:
+        # ``bool`` is an ``int`` subclass but is not a meaningful jitter.
+        if (
+            isinstance(alert_cooldown_jitter_seconds, bool)
+            or not isinstance(alert_cooldown_jitter_seconds, int)
+            or alert_cooldown_jitter_seconds < 0
+        ):
+            raise ApiError(
+                400,
+                "'alert_cooldown_jitter_seconds' must be a non-negative integer",
+            )
     dedupe_window_seconds = payload.get("dedupe_window_seconds")
     if dedupe_window_seconds is not None:
         # ``bool`` is an ``int`` subclass but is not a meaningful window.
@@ -287,6 +299,7 @@ def validate_source_payload(
         retention_days=retention_days,
         max_entries=max_entries,
         alert_cooldown_seconds=alert_cooldown_seconds,
+        alert_cooldown_jitter_seconds=alert_cooldown_jitter_seconds,
         dedupe_window_seconds=dedupe_window_seconds,
         escalation_window_seconds=escalation_window_seconds,
         headers=normalized_headers,

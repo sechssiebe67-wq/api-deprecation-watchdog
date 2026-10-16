@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS sources (
     retention_days INTEGER,
     max_entries INTEGER,
     alert_cooldown_seconds INTEGER,
+    alert_cooldown_jitter_seconds INTEGER,
     dedupe_window_seconds INTEGER,
     escalation_window_seconds INTEGER,
     last_title_alerts TEXT,
@@ -206,6 +207,11 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE sources ADD COLUMN alert_cooldown_seconds INTEGER"
             )
+        if "alert_cooldown_jitter_seconds" not in source_columns:
+            # Old rows keep ``NULL`` (read back as no cooldown jitter, the default).
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN alert_cooldown_jitter_seconds INTEGER"
+            )
         if "dedupe_window_seconds" not in source_columns:
             # Old rows keep ``NULL`` (read back as no dedupe window, the default).
             self._conn.execute(
@@ -273,13 +279,14 @@ class Store:
                     min_severity, notify_min_severity, notify_channels,
                     notify_webhook_url, scan_interval_seconds,
                     scan_jitter_seconds, max_bytes, retention_days, max_entries,
-                    alert_cooldown_seconds, dedupe_window_seconds,
+                    alert_cooldown_seconds, alert_cooldown_jitter_seconds,
+                    dedupe_window_seconds,
                     escalation_window_seconds, headers, auth,
                     extra_keywords,
                     suppress_keywords, failure_count, breaker_until, truncated,
                     last_alert_at, last_severity_alerts, alerts_suppressed,
                     created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -298,6 +305,7 @@ class Store:
                     source.retention_days,
                     source.max_entries,
                     source.alert_cooldown_seconds,
+                    source.alert_cooldown_jitter_seconds,
                     source.dedupe_window_seconds,
                     source.escalation_window_seconds,
                     json.dumps(source.headers or {}),
@@ -930,6 +938,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         retention_days=row["retention_days"],
         max_entries=row["max_entries"],
         alert_cooldown_seconds=row["alert_cooldown_seconds"],
+        alert_cooldown_jitter_seconds=row["alert_cooldown_jitter_seconds"],
         dedupe_window_seconds=row["dedupe_window_seconds"],
         escalation_window_seconds=row["escalation_window_seconds"],
         headers=json.loads(row["headers"] or "{}"),

@@ -91,6 +91,13 @@ def render_dashboard(
         if source.alert_cooldown_seconds:
             # A compact, secret-free indicator that repeats are being coalesced.
             label += " \u00b7 cooldown %ss" % source.alert_cooldown_seconds
+        elif source.alert_cooldown_jitter_seconds:
+            # Jitter only matters with a cooldown; show a zero base so the
+            # window is explicit.
+            label += " \u00b7 cooldown 0s"
+        if source.alert_cooldown_jitter_seconds:
+            # The deterministic, id-derived spread window, e.g. `` +0-60s``.
+            label += " +0-%ds" % source.alert_cooldown_jitter_seconds
         if source.dedupe_window_seconds:
             # Time-since-last-dispatch of the same normalized title.
             label += " \u00b7 dedupe %ss" % source.dedupe_window_seconds

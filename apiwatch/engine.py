@@ -315,6 +315,31 @@ class Engine:
         return self.store.prune_entries(self.retention_days, overrides, self.now())
 
     @staticmethod
+    def _effective_cooldown(source: Optional[Source]) -> int:
+        """Return a source's effective alert-cooldown window in seconds.
+
+        The window is ``alert_cooldown_seconds`` plus a deterministic,
+        source-id-derived jitter offset when ``alert_cooldown_jitter_seconds`` is
+        set: ``alert_cooldown_seconds + (source.id % (jitter + 1))``. The offset
+        is stable for a given ``(id, jitter)`` pair — never random — so many
+        sources that share the same ``alert_cooldown_seconds`` no longer release
+        their coalesced alerts on the same tick. A source with no
+        ``alert_cooldown_seconds`` (or ``0``) returns ``0`` regardless of the
+        jitter, and a source without jitter returns exactly
+        ``alert_cooldown_seconds``, so the pre-feature behaviour is preserved
+        byte-for-byte.
+        """
+        if source is None:
+            return 0
+        cooldown = source.alert_cooldown_seconds or 0
+        if cooldown <= 0:
+            return 0
+        jitter = source.alert_cooldown_jitter_seconds or 0
+        if jitter > 0 and source.id is not None:
+            cooldown += source.id % (jitter + 1)
+        return cooldown
+
+    @staticmethod
     def _meets_notification_floor(alert: Alert, source: Optional[Source]) -> bool:
         """Return whether ``alert`` clears its source's notification floor.
 
@@ -344,7 +369,9 @@ class Engine:
           otherwise ``min_severity``) holds back alerts whose severity ranks
           below it;
         * ``alert_cooldown_seconds`` holds back every alert from a source that
-          alerted within the previous ``N`` seconds; and
+          alerted within the previous ``N`` seconds (extended by the
+          deterministic, id-derived ``alert_cooldown_jitter_seconds`` offset when
+          set); and
         * ``dedupe_window_seconds`` holds back an alert whose normalized title
           was already dispatched from the same source within the window.
 
@@ -386,7 +413,7 @@ class Engine:
             if source_id in allowed:
                 continue
             source = sources.get(source_id)
-            cooldown = source.alert_cooldown_seconds if source is not None else None
+            cooldown = self._effective_cooldown(source)
             if not cooldown or source is None or not source.last_alert_at:
                 allowed[source_id] = True
                 continue
