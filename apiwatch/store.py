@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS sources (
     max_bytes INTEGER,
     retention_days INTEGER,
     max_entries INTEGER,
+    max_alerts_per_scan INTEGER,
     alert_cooldown_seconds INTEGER,
     alert_cooldown_jitter_seconds INTEGER,
     dedupe_window_seconds INTEGER,
@@ -213,6 +214,11 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE sources ADD COLUMN max_entries INTEGER"
             )
+        if "max_alerts_per_scan" not in source_columns:
+            # Old rows keep ``NULL`` so they stay uncapped (every alert fans out).
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN max_alerts_per_scan INTEGER"
+            )
         if "alert_cooldown_seconds" not in source_columns:
             # Old rows keep ``NULL`` (read back as no cooldown, i.e. the default).
             self._conn.execute(
@@ -290,6 +296,7 @@ class Store:
                     min_severity, notify_min_severity, notify_channels,
                     notify_webhook_url, scan_interval_seconds,
                     scan_jitter_seconds, max_bytes, retention_days, max_entries,
+                    max_alerts_per_scan,
                     alert_cooldown_seconds, alert_cooldown_jitter_seconds,
                     dedupe_window_seconds,
                     escalation_window_seconds, headers, auth,
@@ -298,7 +305,7 @@ class Store:
                     failure_count, breaker_until, truncated,
                     last_alert_at, last_severity_alerts, alerts_suppressed,
                     created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -316,6 +323,7 @@ class Store:
                     source.max_bytes,
                     source.retention_days,
                     source.max_entries,
+                    source.max_alerts_per_scan,
                     source.alert_cooldown_seconds,
                     source.alert_cooldown_jitter_seconds,
                     source.dedupe_window_seconds,
@@ -994,6 +1002,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         max_bytes=row["max_bytes"],
         retention_days=row["retention_days"],
         max_entries=row["max_entries"],
+        max_alerts_per_scan=row["max_alerts_per_scan"],
         alert_cooldown_seconds=row["alert_cooldown_seconds"],
         alert_cooldown_jitter_seconds=row["alert_cooldown_jitter_seconds"],
         dedupe_window_seconds=row["dedupe_window_seconds"],
