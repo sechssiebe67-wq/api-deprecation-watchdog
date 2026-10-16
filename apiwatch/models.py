@@ -11,6 +11,19 @@ SEVERITIES = ("critical", "warning", "info")
 NOTIFY_CHANNELS = ("console", "slack", "email", "webhook")
 ALL_CHANNELS = "all"
 
+_SEVERITY_RANK = {"critical": 3, "warning": 2, "info": 1}
+
+
+def severity_rank(severity: str) -> int:
+    """Rank a severity on the shared ``critical`` > ``warning`` > ``info`` ladder.
+
+    Returns ``3``/``2``/``1`` for the known severities and ``0`` for anything
+    else (including ``None``), so an unknown value ranks below every known
+    severity. The relevance engine reuses the same ladder through this helper,
+    which keeps the engine and the store from drifting apart.
+    """
+    return _SEVERITY_RANK.get(severity, 0)
+
 
 def parse_iso8601(value: str) -> datetime:
     """Parse an ISO-8601 timestamp into a timezone-aware UTC ``datetime``.
@@ -73,6 +86,7 @@ class Source:
     retention_days: Optional[int] = None
     alert_cooldown_seconds: Optional[int] = None
     dedupe_window_seconds: Optional[int] = None
+    escalation_window_seconds: Optional[int] = None
     headers: Dict[str, str] = field(default_factory=dict)
     auth: Optional[str] = None
     extra_keywords: List[str] = field(default_factory=list)
@@ -83,6 +97,7 @@ class Source:
     breaker_until: Optional[str] = None
     truncated: bool = False
     last_alert_at: Optional[str] = None
+    last_severity_alerts: Dict[str, str] = field(default_factory=dict)
     alerts_suppressed: int = 0
 
     def __post_init__(self) -> None:
@@ -148,12 +163,32 @@ class Source:
                 raise ValueError(
                     "dedupe_window_seconds must be a non-negative integer"
                 )
+        escalation = self.escalation_window_seconds
+        if escalation is not None:
+            # ``bool`` is an ``int`` subclass but is not a meaningful window.
+            if (
+                isinstance(escalation, bool)
+                or not isinstance(escalation, int)
+                or escalation < 0
+            ):
+                raise ValueError(
+                    "escalation_window_seconds must be a non-negative integer"
+                )
         if (
             isinstance(self.alerts_suppressed, bool)
             or not isinstance(self.alerts_suppressed, int)
             or self.alerts_suppressed < 0
         ):
             raise ValueError("alerts_suppressed must be a non-negative integer")
+        if self.last_severity_alerts is None:
+            self.last_severity_alerts = {}
+        elif not isinstance(self.last_severity_alerts, dict):
+            raise ValueError("last_severity_alerts must be an object of strings")
+        else:
+            self.last_severity_alerts = {
+                str(severity): str(when)
+                for severity, when in self.last_severity_alerts.items()
+            }
         self.truncated = bool(self.truncated)
         channels = self.notify_channels
         if channels is None:
@@ -267,6 +302,8 @@ class Source:
             "retention_days": self.retention_days,
             "alert_cooldown_seconds": self.alert_cooldown_seconds,
             "dedupe_window_seconds": self.dedupe_window_seconds,
+            "escalation_window_seconds": self.escalation_window_seconds,
+            "last_severity_alerts": dict(self.last_severity_alerts),
             "headers": dict(self.headers),
             "auth": self.auth,
             "extra_keywords": list(self.extra_keywords),

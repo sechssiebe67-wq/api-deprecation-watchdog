@@ -222,6 +222,17 @@ def validate_source_payload(
             raise ApiError(
                 400, "'dedupe_window_seconds' must be a non-negative integer"
             )
+    escalation_window_seconds = payload.get("escalation_window_seconds")
+    if escalation_window_seconds is not None:
+        # ``bool`` is an ``int`` subclass but is not a meaningful window.
+        if (
+            isinstance(escalation_window_seconds, bool)
+            or not isinstance(escalation_window_seconds, int)
+            or escalation_window_seconds < 0
+        ):
+            raise ApiError(
+                400, "'escalation_window_seconds' must be a non-negative integer"
+            )
     headers = payload.get("headers")
     if headers is None:
         headers = {}
@@ -267,6 +278,7 @@ def validate_source_payload(
         retention_days=retention_days,
         alert_cooldown_seconds=alert_cooldown_seconds,
         dedupe_window_seconds=dedupe_window_seconds,
+        escalation_window_seconds=escalation_window_seconds,
         headers=normalized_headers,
         auth=auth,
         extra_keywords=extra_keywords,

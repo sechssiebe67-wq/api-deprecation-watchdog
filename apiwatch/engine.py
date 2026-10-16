@@ -19,6 +19,7 @@ from .models import (
     Source,
     normalize_alert_title,
     parse_iso8601,
+    severity_rank,
 )
 from .notify import NotificationError, Notifier, format_alert
 from .relevance import analyze, meets_floor
@@ -336,6 +337,12 @@ class Engine:
         * ``dedupe_window_seconds`` holds back an alert whose normalized title
           was already dispatched from the same source within the window.
 
+        A fourth, notification-only filter composes with the others:
+        ``escalation_window_seconds`` holds back an alert whose severity was
+        already dispatched from the same source within the window, so a source
+        that re-announces the *same severity* every few days pages at most once
+        per window while a higher-severity alert still escalates through.
+
         A held-back alert is kept in the store with ``notified = 0`` (so a later
         digest can still pick it up) but is not fanned out now. The last dispatch
         time is read from the source row so the cooldown and the per-title dedupe
@@ -391,6 +398,13 @@ class Engine:
         for source_id, count in dedupe_held.items():
             counts[source_id] = counts.get(source_id, 0) + count
 
+        # Escalation window: hold back a repeat of a severity that was already
+        # dispatched from the same source within the window. Higher-severity
+        # alerts still escalate through, so it composes with the other filters.
+        batch, escalation_held = self._apply_escalation_window(batch, sources, now)
+        for source_id, count in escalation_held.items():
+            counts[source_id] = counts.get(source_id, 0) + count
+
         suppressed = sum(counts.values())
         if counts:
             self.store.record_suppressed_alerts(counts)
@@ -431,15 +445,25 @@ class Engine:
         for source_id in {alert.source_id for alert in batch}:
             self.store.record_source_dispatch(source_id, dispatched_at)
         # Anchor the dedupe window for every title that was actually delivered,
-        # so a hold-back only starts once a fan-out has happened.
+        # so a hold-back only starts once a fan-out has happened. Likewise anchor
+        # the escalation window for every severity that was actually delivered.
+        severity_times: Dict[int, Dict[str, str]] = {}
         for alert in batch:
             if alert.id is None or alert.id not in delivered_ids:
                 continue
             source = sources.get(alert.source_id)
-            if source is not None and source.dedupe_window_seconds:
+            if source is None:
+                continue
+            if source.dedupe_window_seconds:
                 self.store.record_title_dispatch(
                     alert.source_id, alert.title, dispatched_at
                 )
+            if source.escalation_window_seconds:
+                severity_times.setdefault(alert.source_id, {})[
+                    alert.severity
+                ] = dispatched_at
+        for source_id, mapping in severity_times.items():
+            self.store.record_severity_alerts(source_id, mapping)
         if mark and delivered_ids:
             self.store.mark_notified(sorted(delivered_ids))
         return suppressed
@@ -486,6 +510,60 @@ class Engine:
                 held[alert.source_id] = held.get(alert.source_id, 0) + 1
                 continue
             cache[key] = now
+            deliverable.append(alert)
+        return deliverable, held
+
+    def _apply_escalation_window(
+        self,
+        batch: List[Alert],
+        sources: Dict[int, Source],
+        now: datetime,
+    ):
+        """Split ``batch`` into deliverable alerts and per-source held counts.
+
+        An alert is held back when its source sets ``escalation_window_seconds``
+        and an alert of the *same* severity was already dispatched from that
+        source within the window. This stops a source that re-announces the same
+        severity every few days from paging on every re-announcement. Lower- and
+        higher-severity alerts are unaffected by a dispatch of another severity:
+        a higher-severity alert always escalates through, and a genuinely new
+        lower-severity alert is still delivered. Only alerts at or above the
+        effective notification floor reach this stage. A severity accepted
+        earlier in the same batch anchors the window locally, so several
+        same-severity alerts found in one scan yield a single fan-out. Sources
+        without a window (``None`` or ``0``) are passed through untouched, which
+        keeps the pre-feature behaviour byte-for-byte identical.
+        """
+        held: Dict[int, int] = {}
+        deliverable: List[Alert] = []
+        caches: Dict[int, Dict[str, datetime]] = {}
+        for alert in batch:
+            source = sources.get(alert.source_id)
+            window = source.escalation_window_seconds if source is not None else None
+            if not window:
+                deliverable.append(alert)
+                continue
+            cache = caches.get(alert.source_id)
+            if cache is None:
+                cache = {}
+                for severity, when in self.store.severity_dispatch_times(
+                    alert.source_id
+                ).items():
+                    try:
+                        cache[severity] = parse_iso8601(when)
+                    except (TypeError, ValueError):
+                        continue
+                caches[alert.source_id] = cache
+            rank = severity_rank(alert.severity)
+            blocked = any(
+                severity_rank(severity) == rank
+                and (now - when).total_seconds() < window
+                for severity, when in cache.items()
+            )
+            if blocked:
+                held[alert.source_id] = held.get(alert.source_id, 0) + 1
+                continue
+            cache[alert.severity] = now
             deliverable.append(alert)
         return deliverable, held
 
