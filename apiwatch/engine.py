@@ -240,7 +240,18 @@ class Engine:
                 result.alerts_suppressed += self.dispatch(new_alerts)
             elif self.digest_mode == "both":
                 result.alerts_suppressed += self.dispatch(new_alerts, mark=False)
-            # "digest": hold the alerts back for the next digest flush.
+            elif self.digest_mode == "digest":
+                # Held back for the next digest flush, but alerts below the
+                # notification floor will never be claimed by it, so account
+                # for them here exactly once (a flush does not re-count them).
+                floor_held = sum(
+                    1
+                    for alert in new_alerts
+                    if not self._meets_notification_floor(alert, source)
+                )
+                if floor_held:
+                    self.store.record_suppressed_alerts({source.id: floor_held})
+                    result.alerts_suppressed += floor_held
         return result
 
     def scan_sources(
@@ -290,6 +301,20 @@ class Engine:
         }
         return self.store.prune_entries(self.retention_days, overrides, self.now())
 
+    @staticmethod
+    def _meets_notification_floor(alert: Alert, source: Optional[Source]) -> bool:
+        """Return whether ``alert`` clears its source's notification floor.
+
+        The effective floor is the per-source ``notify_min_severity`` when set,
+        otherwise the source's ``min_severity``. An unknown source (``None``)
+        imposes no floor. Alerts below the floor are never fanned out and never
+        marked notified, but remain stored.
+        """
+        if source is None:
+            return True
+        floor = source.notify_min_severity or source.min_severity
+        return meets_floor(alert.severity, floor)
+
     def dispatch(self, alerts: List[Alert], mark: bool = True) -> int:
         """Fan alerts out to the notifiers each source is routed to.
 
@@ -299,13 +324,20 @@ class Engine:
         marked, a failed notifier is logged and skipped) while honouring the
         per-source ``notify_channels`` routing.
 
-        A source may set ``alert_cooldown_seconds`` to suppress notification
-        *only*: when a source alerted within the previous ``N`` seconds its new
-        alerts are kept in the store with ``notified = 0`` (so a later digest can
-        still pick them up) but are not fanned out now. The last dispatch time is
-        read from the source row so the cooldown survives a restart. Returns the
-        number of alerts suppressed by the cooldown so the caller can surface it
-        on :class:`ScanResult`.
+        Two notification-only filters run, in order, before anything is fanned
+        out, so an alert must clear both to be delivered:
+
+        * the per-source notification floor (``notify_min_severity`` when set,
+          otherwise ``min_severity``) holds back alerts whose severity ranks
+          below it; and
+        * ``alert_cooldown_seconds`` holds back every alert from a source that
+          alerted within the previous ``N`` seconds.
+
+        A held-back alert is kept in the store with ``notified = 0`` (so a later
+        digest can still pick it up) but is not fanned out now. The last dispatch
+        time is read from the source row so the cooldown survives a restart.
+        Returns the number of alerts suppressed by either filter so the caller
+        can surface it on :class:`ScanResult`.
         """
         if not alerts or not self.notifiers:
             return 0
@@ -315,8 +347,20 @@ class Engine:
             if source.id is not None
         }
         now = self.now()
-        allowed: Dict[int, bool] = {}
+        counts: Dict[int, int] = {}
+
+        # Notification floor: below-floor alerts are held back first.
+        eligible: List[Alert] = []
         for alert in alerts:
+            if not self._meets_notification_floor(
+                alert, sources.get(alert.source_id)
+            ):
+                counts[alert.source_id] = counts.get(alert.source_id, 0) + 1
+                continue
+            eligible.append(alert)
+
+        allowed: Dict[int, bool] = {}
+        for alert in eligible:
             source_id = alert.source_id
             if source_id in allowed:
                 continue
@@ -332,13 +376,12 @@ class Engine:
                 allowed[source_id] = True
                 continue
             allowed[source_id] = elapsed >= cooldown
-        batch = [alert for alert in alerts if allowed.get(alert.source_id, True)]
-        suppressed = len(alerts) - len(batch)
-        if suppressed:
-            counts: Dict[int, int] = {}
-            for alert in alerts:
-                if not allowed.get(alert.source_id, True):
-                    counts[alert.source_id] = counts.get(alert.source_id, 0) + 1
+        batch = [alert for alert in eligible if allowed.get(alert.source_id, True)]
+        for alert in eligible:
+            if not allowed.get(alert.source_id, True):
+                counts[alert.source_id] = counts.get(alert.source_id, 0) + 1
+        suppressed = sum(counts.values())
+        if counts:
             self.store.record_suppressed_alerts(counts)
         if not batch:
             return suppressed
@@ -387,8 +430,25 @@ class Engine:
         undelivered so the failure can be observed without aborting the caller.
         Alerts are grouped by the set of notifiers they route to, so every
         notifier receives a digest containing only its routed alerts.
+
+        The digest honours the same per-source notification floor as immediate
+        dispatch: an alert below its source's effective floor is never claimed
+        or marked notified and is left pending, so lowering the floor later can
+        still surface it.
         """
         alerts = self.store.list_undigested_alerts()
+        if not alerts:
+            return None
+        sources = {
+            source.id: source
+            for source in self.store.list_sources()
+            if source.id is not None
+        }
+        alerts = [
+            alert
+            for alert in alerts
+            if self._meets_notification_floor(alert, sources.get(alert.source_id))
+        ]
         if not alerts:
             return None
         names = self._source_names()

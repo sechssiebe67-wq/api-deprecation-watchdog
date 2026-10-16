@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS sources (
     enabled INTEGER NOT NULL DEFAULT 1,
     selector TEXT,
     min_severity TEXT NOT NULL DEFAULT 'info',
+    notify_min_severity TEXT,
     notify_channels TEXT NOT NULL DEFAULT '["all"]',
     notify_webhook_url TEXT,
     scan_interval_seconds INTEGER,
@@ -120,6 +121,11 @@ class Store:
         if "min_severity" not in source_columns:
             self._conn.execute(
                 "ALTER TABLE sources ADD COLUMN min_severity TEXT NOT NULL DEFAULT 'info'"
+            )
+        if "notify_min_severity" not in source_columns:
+            # Old rows keep ``NULL`` so they inherit ``min_severity``.
+            self._conn.execute(
+                "ALTER TABLE sources ADD COLUMN notify_min_severity TEXT"
             )
         if "notify_channels" not in source_columns:
             self._conn.execute(
@@ -227,13 +233,13 @@ class Store:
             cur = self._conn.execute(
                 """INSERT INTO sources
                    (name, url, kind, api_name, tracked_versions, enabled, selector,
-                    min_severity, notify_channels, notify_webhook_url,
-                    scan_interval_seconds, scan_jitter_seconds, max_bytes,
-                    retention_days, alert_cooldown_seconds, headers, auth,
-                    extra_keywords, suppress_keywords, failure_count,
-                    breaker_until, truncated, last_alert_at, alerts_suppressed,
-                    created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    min_severity, notify_min_severity, notify_channels,
+                    notify_webhook_url, scan_interval_seconds,
+                    scan_jitter_seconds, max_bytes, retention_days,
+                    alert_cooldown_seconds, headers, auth, extra_keywords,
+                    suppress_keywords, failure_count, breaker_until, truncated,
+                    last_alert_at, alerts_suppressed, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source.name,
                     source.url,
@@ -243,6 +249,7 @@ class Store:
                     1 if source.enabled else 0,
                     source.selector,
                     source.min_severity,
+                    source.notify_min_severity,
                     json.dumps(source.notify_channels),
                     source.notify_webhook_url,
                     source.scan_interval_seconds,
@@ -709,6 +716,7 @@ def _row_to_source(row: sqlite3.Row) -> Source:
         enabled=bool(row["enabled"]),
         selector=row["selector"],
         min_severity=row["min_severity"],
+        notify_min_severity=row["notify_min_severity"],
         notify_channels=json.loads(row["notify_channels"] or '["all"]'),
         notify_webhook_url=row["notify_webhook_url"],
         scan_interval_seconds=row["scan_interval_seconds"],

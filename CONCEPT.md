@@ -125,6 +125,20 @@ heterogeneous noise into a single prioritized alert stream.
   source documenting a critical dependency keeps surfacing everything. Entries
   below the floor are still persisted, so history, `/api/entries` and
   content-hash de-duplication are unaffected.
+- **Per-source notification floor:** every source optionally carries a
+  `notify_min_severity` (`critical`, `warning` or `info`, default `None`, which
+  means "inherit `min_severity`"). It is a second, *notification-only* floor:
+  entries that clear `min_severity` are still classified and stored and still
+  produce an alert, but an alert whose severity ranks below the
+  effective notification floor (`notify_min_severity or min_severity`) is never
+  fanned out by `Engine.dispatch` and is never claimed by a digest flush. It
+  stays in the store with `notified = 0` — visible through `/api/entries`,
+  `/api/alerts` and `/api/export` and eligible for a later digest once the floor
+  is lowered — so an operator can "record `info` for history, but only *notify*
+  on `critical`" without dropping the lower-severity rows from the store. The
+  number of alerts held back is counted as `alerts_suppressed` (the same field
+  the cooldown uses) and the dashboard shows a compact `notify: <severity>`
+  indicator, or `–` when the source inherits `min_severity`.
 - **Per-source alert cooldown:** every source optionally carries an
   `alert_cooldown_seconds` (a non-negative integer, default `None` / `0`, which
   means no cooldown and is byte-for-byte equivalent to the pre-feature
@@ -207,6 +221,8 @@ heterogeneous noise into a single prioritized alert stream.
   summarised by `sources_tripped` in `GET /api/stats`.
 - **Persistence:** SQLite store with de-duplication by content hash, so the same
   announcement is only alerted once.   The source table stores
+  `notify_min_severity` (text or `NULL`, where `NULL` means inherit
+  `min_severity`),
   `scan_interval_seconds`, `scan_jitter_seconds` (integer or `NULL`, where
   `NULL`/`0` means no jitter), `max_bytes` (integer or `NULL`),
   `retention_days` (integer or `NULL`), `alert_cooldown_seconds` (integer or
@@ -301,9 +317,9 @@ heterogeneous noise into a single prioritized alert stream.
 | ------ | ----------------- | ----------------------------------------- |
 | GET    | `/healthz`        | Liveness/readiness probe                  |
 | GET    | `/`               | HTML dashboard                            |
-| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `alert_cooldown_seconds`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
-| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `alert_cooldown_seconds`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
-| GET    | `/api/sources/:id`| Fetch one source (incl. `alert_cooldown_seconds`, `scan_jitter_seconds` and breaker fields) |
+| GET    | `/api/sources`    | List monitored sources (incl. `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `alert_cooldown_seconds`, `headers`, `auth`, `extra_keywords`, `suppress_keywords`, `failure_count`, `breaker_until`, `truncated`) |
+| POST   | `/api/sources`    | Register a source, incl. optional `min_severity`, `notify_min_severity`, `notify_channels`, `notify_webhook_url`, `scan_interval_seconds`, `scan_jitter_seconds`, `max_bytes`, `retention_days`, `alert_cooldown_seconds`, `headers`, `auth`, `extra_keywords` and `suppress_keywords` (token protected) |
+| GET    | `/api/sources/:id`| Fetch one source (incl. `notify_min_severity`, `alert_cooldown_seconds`, `scan_jitter_seconds` and breaker fields) |
 | GET    | `/api/sources/:id/entries` | List one source's entries, newest first (`?limit=`, `?offset=`) |
 | POST   | `/api/sources/:id/reset` | Clear one source's `failure_count` and `breaker_until` (token protected) |
 | DELETE | `/api/sources/:id`| Remove a source (token protected)         |
@@ -390,6 +406,12 @@ no entries exactly as it does for an unknown key.
 Every source also accepts an optional `min_severity` (`critical`, `warning` or
 `info`, default `info`). An entry is only turned into an alert when its severity
 ranks at or above this floor; lower-severity entries are still parsed and stored.
+An optional `notify_min_severity` adds a second, notification-only floor: when it
+is set, an alert that clears `min_severity` but ranks below `notify_min_severity`
+is still stored (visible through the API, the export and the dashboard) with
+`notified = 0`, but is never fanned out by `Engine.dispatch` or claimed by a
+digest flush. Omitting it (or sending `null`) means "inherit `min_severity`" and
+is byte-for-byte equivalent to the pre-feature behaviour.
 
 ## Keyword overrides
 
@@ -641,6 +663,55 @@ curl -X POST http://localhost:8080/api/sources \
   -d '{"name":"Noisy changelog","url":"https://noisy.example/changelog.json",
        "kind":"json","api_name":"Noisy","tracked_versions":["v2"],
        "alert_cooldown_seconds":3600}'
+```
+
+## Notification floor
+
+`min_severity` controls whether an alert is *created* at all. Sometimes an
+operator wants the opposite split: keep the `info` rows for the audit trail, but
+never notify on anything below `critical`. `notify_min_severity` is that second,
+notification-only floor.
+
+- **Field:** `notify_min_severity` is an optional `critical`, `warning` or `info`
+  on a source (case-insensitive, trimmed). Omitted or `null` means "inherit
+  `min_severity`" and is stored as `NULL`; any other value is rejected with a
+  `400` naming `notify_min_severity`. It may be set independently of
+  `min_severity` — for example `min_severity: "info"` with
+  `notify_min_severity: "critical"` records `info` and `warning` alerts without
+  ever notifying on them.
+- **Effective floor:** the engine computes
+  `source.notify_min_severity or source.min_severity` per alert and reuses the
+  shared `meets_floor` comparison from `relevance.py`, so the notification floor
+  and the storage floor cannot drift apart.
+- **Dispatch:** in `Engine.dispatch`, an alert below the effective floor is not
+  fanned out and is *not* marked notified. It counts towards `alerts_suppressed`
+  and composes with `alert_cooldown_seconds`: an alert must clear both filters to
+  be delivered.
+- **Digests:** `flush_digest` passes only alerts that clear their source's floor
+  to the pure `build_digest` builder, so `DIGEST_MODE=digest`/`both` honours the
+  same rule. A below-floor alert is left pending (`notified = 0`,
+  `digest_id IS NULL`) rather than claimed, so lowering the floor later can still
+  surface it; a `digest` scan counts the held-back alerts once, and a flush never
+  re-counts them.
+- **Notification only:** a held-back alert is *not* deleted or hidden. It appears
+  in `GET /api/alerts`, `GET /api/entries` and `GET /api/export`, participates in
+  de-duplication as usual, and carries `notified = 0`. The dashboard shows a
+  compact `notify: <severity>` indicator next to the `Min severity` badge, or an
+  en-dash (`–`) when the source inherits `min_severity`; no secret values are
+  rendered.
+- **Migration:** databases created before this feature gain the
+  `notify_min_severity` column automatically. Existing rows read back as `NULL`,
+  i.e. they inherit `min_severity`, so omitting the field reproduces the
+  pre-feature behaviour exactly (same dispatch set, same `notified` flags, same
+  `alerts_suppressed` count, same digest contents).
+
+```sh
+# Record info and warning alerts for history, but only ever notify on critical.
+curl -X POST http://localhost:8080/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Vendor SDK","url":"https://vendor.example/changelog.json",
+       "kind":"json","api_name":"Vendor","tracked_versions":["v2"],
+       "min_severity":"info","notify_min_severity":"critical"}'
 ```
 
 ## Routing
@@ -897,6 +968,17 @@ and alerting remain separate. This directly advances the *low noise / smarter
 relevance* goal: a re-announced deprecation no longer floods Slack, e-mail or
 the webhook channel with duplicates.
 
+*Shipped:* **per-source notification floor** (see *Current capabilities* and
+*Notification floor*) — an optional `notify_min_severity` that defaults to
+inheriting `min_severity` and separates persistence from alerting a second time:
+an alert may be stored as history without ever being fanned out by
+`Engine.dispatch` or claimed by a digest flush. It reuses the shared
+`meets_floor` comparison, composes with the cooldown (an alert must clear both),
+counts held-back alerts as `alerts_suppressed`, adds a `notify: <severity>`
+dashboard indicator and migrates old databases with the column left `NULL`. This
+directly advances the *Smarter relevance* item below: teams can now keep a full
+`info` audit trail while paging only on `critical`.
+
 *Shipped:* **array-index selectors and entry pagination** (see *Current
 capabilities* and *Selector syntax*) — numeric segments (`0`, `1`, … and `-1`
 for the last element) in the dotted `json`/`github`/`gitlab`/`openapi` selector,
@@ -916,10 +998,11 @@ remain explicit next steps rather than shipped behaviour.
    trackers remain.
 2. **Smarter relevance:** semantic matching of version ranges (semver / date
    versions), per-team severity rules and richer keyword tuning. *Partially
-   shipped:* per-source `min_severity` and `notify_channels` already let a team
-   tune the volume and destination of alerts per dependency, and the shipped
-   per-source `extra_keywords` / `suppress_keywords` overrides let a team extend
-   or mute the detection vocabulary without forking the service.
+   shipped:* per-source `min_severity`, `notify_min_severity` and
+   `notify_channels` already let a team tune the volume and destination of alerts
+   per dependency, and the shipped per-source `extra_keywords` /
+   `suppress_keywords` overrides let a team extend or mute the detection
+   vocabulary without forking the service.
 3. **Integrations:** GitHub/GitLab issues and Jira as delivery targets.
    *Partially shipped:* per-source `notify_channels` routes alerts to the
    existing Slack, e-mail, console and generic `webhook` channels, and the

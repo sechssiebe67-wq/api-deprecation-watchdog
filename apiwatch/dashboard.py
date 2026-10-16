@@ -116,6 +116,15 @@ def render_dashboard(
             return "%dd" % source.retention_days
         return "\u2013"
 
+    def _notify_floor_label(source: Source) -> str:
+        """A compact ``notify: <severity>`` or an en-dash when inheriting.
+
+        Only the severity name is shown; no secret value is ever rendered.
+        """
+        if source.notify_min_severity:
+            return "notify: %s" % source.notify_min_severity
+        return "\u2013"
+
     def _health_cell(source: Source) -> str:
         """Render the breaker health without ever exposing headers/credentials.
 
@@ -163,7 +172,8 @@ def render_dashboard(
                 _esc(source.api_name),
                 _esc(", ".join(source.tracked_versions)),
                 _esc(_interval_label(source)),
-                _badge(source.min_severity),
+                "%s <span class=\"muted\">%s</span>"
+                % (_badge(source.min_severity), _esc(_notify_floor_label(source))),
                 _esc(", ".join(source.notify_channels)),
                 _esc(_truncate(source.notify_webhook_url) if source.notify_webhook_url else "\u2013"),
                 _esc(_auth_indicator(source)),
