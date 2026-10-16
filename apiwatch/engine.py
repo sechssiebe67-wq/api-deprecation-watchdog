@@ -17,6 +17,7 @@ from .models import (
     Digest,
     Entry,
     Source,
+    normalize_alert_title,
     parse_iso8601,
 )
 from .notify import NotificationError, Notifier, format_alert
@@ -324,20 +325,22 @@ class Engine:
         marked, a failed notifier is logged and skipped) while honouring the
         per-source ``notify_channels`` routing.
 
-        Two notification-only filters run, in order, before anything is fanned
-        out, so an alert must clear both to be delivered:
+        Three notification-only filters run, in order, before anything is fanned
+        out, so an alert must clear all of them to be delivered:
 
         * the per-source notification floor (``notify_min_severity`` when set,
           otherwise ``min_severity``) holds back alerts whose severity ranks
-          below it; and
+          below it;
         * ``alert_cooldown_seconds`` holds back every alert from a source that
-          alerted within the previous ``N`` seconds.
+          alerted within the previous ``N`` seconds; and
+        * ``dedupe_window_seconds`` holds back an alert whose normalized title
+          was already dispatched from the same source within the window.
 
         A held-back alert is kept in the store with ``notified = 0`` (so a later
         digest can still pick it up) but is not fanned out now. The last dispatch
-        time is read from the source row so the cooldown survives a restart.
-        Returns the number of alerts suppressed by either filter so the caller
-        can surface it on :class:`ScanResult`.
+        time is read from the source row so the cooldown and the per-title dedupe
+        window survive a restart. Returns the number of alerts suppressed by the
+        filters so the caller can surface it on :class:`ScanResult`.
         """
         if not alerts or not self.notifiers:
             return 0
@@ -380,6 +383,14 @@ class Engine:
         for alert in eligible:
             if not allowed.get(alert.source_id, True):
                 counts[alert.source_id] = counts.get(alert.source_id, 0) + 1
+
+        # Dedupe window: hold back an alert whose normalized title was already
+        # dispatched from the same source within the window. Runs after the
+        # floor and cooldown filters so all three compose.
+        batch, dedupe_held = self._apply_dedupe_window(batch, sources, now)
+        for source_id, count in dedupe_held.items():
+            counts[source_id] = counts.get(source_id, 0) + count
+
         suppressed = sum(counts.values())
         if counts:
             self.store.record_suppressed_alerts(counts)
@@ -419,9 +430,64 @@ class Engine:
         dispatched_at = now.isoformat(timespec="seconds")
         for source_id in {alert.source_id for alert in batch}:
             self.store.record_source_dispatch(source_id, dispatched_at)
+        # Anchor the dedupe window for every title that was actually delivered,
+        # so a hold-back only starts once a fan-out has happened.
+        for alert in batch:
+            if alert.id is None or alert.id not in delivered_ids:
+                continue
+            source = sources.get(alert.source_id)
+            if source is not None and source.dedupe_window_seconds:
+                self.store.record_title_dispatch(
+                    alert.source_id, alert.title, dispatched_at
+                )
         if mark and delivered_ids:
             self.store.mark_notified(sorted(delivered_ids))
         return suppressed
+
+    def _apply_dedupe_window(
+        self,
+        batch: List[Alert],
+        sources: Dict[int, Source],
+        now: datetime,
+    ):
+        """Split ``batch`` into deliverable alerts and per-source held counts.
+
+        An alert is held back when its source sets ``dedupe_window_seconds`` and
+        the alert's normalized title was already dispatched from that source
+        within the window. A title accepted earlier in the same batch also
+        anchors the window locally, so two near-identical alerts found in one
+        scan yield a single fan-out. Sources without a window (``None`` or ``0``)
+        are passed through untouched, which keeps the pre-feature behaviour
+        byte-for-byte identical.
+        """
+        held: Dict[int, int] = {}
+        deliverable: List[Alert] = []
+        caches: Dict[int, Dict[str, datetime]] = {}
+        for alert in batch:
+            source = sources.get(alert.source_id)
+            window = source.dedupe_window_seconds if source is not None else None
+            if not window:
+                deliverable.append(alert)
+                continue
+            cache = caches.get(alert.source_id)
+            if cache is None:
+                cache = {}
+                for title, when in self.store.title_dispatch_times(
+                    alert.source_id
+                ).items():
+                    try:
+                        cache[title] = parse_iso8601(when)
+                    except (TypeError, ValueError):
+                        continue
+                caches[alert.source_id] = cache
+            key = normalize_alert_title(alert.title)
+            prior = cache.get(key)
+            if prior is not None and (now - prior).total_seconds() < window:
+                held[alert.source_id] = held.get(alert.source_id, 0) + 1
+                continue
+            cache[key] = now
+            deliverable.append(alert)
+        return deliverable, held
 
     def flush_digest(self) -> Optional[Digest]:
         """Build and deliver a digest for the pending alerts, if any.
